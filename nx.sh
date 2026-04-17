@@ -1742,7 +1742,7 @@ _scan_unmanaged_confs() {
       grep -q '^# managed_by=Nginx-X$' "$conf" 2>/dev/null && continue
       # 跳过 nginx 默认/状态配置
       local base; base="$(basename "$conf")"
-      [[ "$base" == "default" || "$base" == "default.conf" || "$base" == "nginx_status.conf" ]] && continue
+      [[ "$base" == default || "$base" == default.conf || "$base" == default.conf.* || "$base" == nginx_status.conf ]] && continue
       # 通过 realpath 去重（sites-enabled 软链接 → sites-available）
       real_path="$(realpath "$conf" 2>/dev/null || echo "$conf")"
       [[ -n "${seen[$real_path]:-}" ]] && continue
