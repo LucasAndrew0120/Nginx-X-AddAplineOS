@@ -1401,7 +1401,15 @@ modify_conf() {
     info "配置已修改并生效。"
 
     if ! confirm "是否立即启用该配置？"; then
-      info "配置已保存，可稍后在配置列表中启用。"
+      ${SUDO} mv "$new_target" "${new_target}.bak"
+      if nginx_test; then
+        reload_nginx_safe
+        info "配置已保存并停用，可稍后在配置列表中启用。"
+      else
+        ${SUDO} mv "${new_target}.bak" "$new_target"
+        error "停用失败，已恢复启用状态。"
+        ${SUDO} nginx -t || true
+      fi
       rm -f "$tmp"
       return 0
     fi
