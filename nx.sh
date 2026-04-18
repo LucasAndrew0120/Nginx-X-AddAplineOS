@@ -1400,6 +1400,12 @@ modify_conf() {
 
     info "配置已修改并生效。"
 
+    if ! confirm "是否立即启用该配置？"; then
+      info "配置已保存，可稍后在配置列表中启用。"
+      rm -f "$tmp"
+      return 0
+    fi
+
     # 统一 HTTPS 启用流程（与 add_reverse_proxy 一致）
     if valid_ipv4_host "$new_domain"; then
       warn "当前使用的是 IP，证书自动申请通常不适用，已跳过证书流程。"
