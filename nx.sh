@@ -1398,47 +1398,31 @@ modify_conf() {
       ${SUDO} rm -f "$src"
     fi
 
-    info "配置已修改并保持启用。"
+    info "配置已修改并生效。"
 
-    # HTTPS 检查逻辑（与 add_reverse_proxy 统一）
+    # 统一 HTTPS 启用流程（与 add_reverse_proxy 一致）
     if valid_ipv4_host "$new_domain"; then
       warn "当前使用的是 IP，证书自动申请通常不适用，已跳过证书流程。"
-    elif grep -qE '^# https_enabled=true' "$new_target" 2>/dev/null; then
-      # 已启用 HTTPS，检查证书文件是否仍存在
-      if [[ ! -f "${SSL_DIR}/${new_domain}/fullchain.pem" || ! -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
-        warn "当前配置已启用 HTTPS，但证书文件缺失。"
-        if confirm "是否立即申请证书？"; then
-          if ensure_email_interactive && issue_cert_for_domain "$new_domain"; then
-            reload_nginx_safe
-            info "证书已申请并生效。"
-          else
-            warn "证书申请失败，请检查域名解析和 80 端口是否放行。"
-          fi
+    elif [[ -f "${SSL_DIR}/${new_domain}/fullchain.pem" && -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
+      if confirm "检测到已有证书，是否立即启用 HTTPS（强制跳转）？"; then
+        if enable_https_for_conf_file "$new_domain" "$new_target" "$new_listen"; then
+          info "已完成：配置修改 + HTTPS 启用。"
+        else
+          warn "启用 HTTPS 失败。请检查证书、监听端口占用情况，以及 nginx -t 输出后重试。"
         fi
       fi
     else
-      # 未启用 HTTPS
-      if [[ -f "${SSL_DIR}/${new_domain}/fullchain.pem" && -f "${SSL_DIR}/${new_domain}/privkey.pem" ]]; then
-        if confirm "检测到已有证书，是否立即启用 HTTPS？"; then
+      if confirm "是否立即自动申请证书并启用 HTTPS？"; then
+        if ! ensure_email_interactive; then
+          warn "邮箱未设置成功，已跳过自动证书流程。"
+        elif issue_cert_for_domain "$new_domain"; then
           if enable_https_for_conf_file "$new_domain" "$new_target" "$new_listen"; then
-            info "已完成：配置修改 + HTTPS 启用。"
+            info "已完成：配置修改 + 自动证书 + 自动 HTTPS。"
           else
-            warn "启用 HTTPS 失败。请检查证书、监听端口占用情况，以及 nginx -t 输出后重试。"
+            warn "证书已申请成功，但启用 HTTPS 失败。请检查监听端口占用和 nginx -t 输出。"
           fi
-        fi
-      else
-        if confirm "是否立即自动申请证书并启用 HTTPS？"; then
-          if ! ensure_email_interactive; then
-            warn "邮箱未设置成功，已跳过自动证书流程。"
-          elif issue_cert_for_domain "$new_domain"; then
-            if enable_https_for_conf_file "$new_domain" "$new_target" "$new_listen"; then
-              info "已完成：配置修改 + 自动证书 + 自动 HTTPS。"
-            else
-              warn "证书已申请成功，但启用 HTTPS 失败。请检查监听端口占用和 nginx -t 输出。"
-            fi
-          else
-            warn "自动证书申请失败。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
-          fi
+        else
+          warn "自动证书申请失败。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
         fi
       fi
     fi
