@@ -1354,6 +1354,13 @@ modify_conf() {
   current_listen="$(conf_meta_get "$src" listen_port)"
   current_backend="$(conf_meta_get "$src" backend_port)"
   [[ -z "$current_listen" ]] && current_listen="80"
+  # 元数据缺失时从实际 proxy_pass 提取后端端口
+  if [[ -z "$current_backend" ]]; then
+    current_backend="$(grep -oP 'proxy_pass\s+https?://127\.0\.0\.1:\K[0-9]+' "$src" 2>/dev/null | head -1)"
+  fi
+  if [[ -z "$current_backend" ]]; then
+    current_backend="$(grep -oP 'proxy_pass\s+https?://localhost:\K[0-9]+' "$src" 2>/dev/null | head -1)"
+  fi
   [[ -z "$current_backend" ]] && current_backend="3000"
 
   read -rp "新的域名（当前 ${current_domain}）: " new_domain
