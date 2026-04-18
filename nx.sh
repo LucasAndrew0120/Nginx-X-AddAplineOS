@@ -1753,6 +1753,13 @@ _scan_unmanaged_confs() {
       _cp="$(awk '/^[[:space:]]*server[[:space:]]*\{/{s=1} s && /^[[:space:]]*listen[[:space:]]/{gsub(/;/,""); for(i=2;i<=NF;i++){if($i~/^[0-9]+$/){print $i; exit}}}' "$conf")"
       [[ -z "$_cp" ]] && _cp="80"
       [[ -n "$_cd" && -n "${managed_index["${_cd}|${_cp}"]:-}" ]] && continue
+      # 对 sites-available/sites-enabled 的文件，额外检查 conf.d 是否已存在同名纳管配置
+      if [[ "$dir" != "$CONF_DIR" ]]; then
+        local _candidate="${CONF_DIR}/${_cd}-${_cp}.conf"
+        if [[ -f "$_candidate" ]] && grep -q '^# managed_by=Nginx-X$' "$_candidate" 2>/dev/null; then
+          continue
+        fi
+      fi
       echo "$conf"
     done
   done
@@ -1863,7 +1870,13 @@ import_single_conf() {
         info "已移除 sites-enabled 软链接：$(basename "$enabled_link")"
       fi
     done
-    note "原始文件保留在：${real_conf}"
+    # 导入成功后询问是否删除原文件
+    if confirm "是否删除原始配置文件 ${real_conf}？（推荐删除，避免重复扫描）"; then
+      ${SUDO} rm -f "$real_conf"
+      info "已删除原始文件：${real_conf}"
+    else
+      note "原始文件保留在：${real_conf}"
+    fi
   fi
 
   rm -f "$tmp"
