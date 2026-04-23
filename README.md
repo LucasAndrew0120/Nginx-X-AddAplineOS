@@ -62,7 +62,7 @@ bash install.sh
      - `Stream 模式`
      - `Emby 分离 HTTP 推流`
      - `Emby 分离 HTTPS 推流`
-     - `LilyEmby 方案三（支持 sub_filter 响应体替换）`
+     - `LilyEmby 方案（访问/推流分离，支持 sub_filter 响应体替换）`
    - Emby/Lily 模式支持配置主站上游、推流节点 URL、源站公开 URL、Referer URL
    - 同端口多域名场景自动适配：若目标端口已用于 HTTPS，会自动处理为可通过 `nginx -t` 的流程
    - 自动生成标准 Proxy Header，配置写入 `/etc/nginx/conf.d/域名-监听端口.conf`

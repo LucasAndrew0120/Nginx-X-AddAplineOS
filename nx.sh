@@ -584,7 +584,7 @@ external_mode_name() {
     media) echo "Stream 模式" ;;
     emby_http) echo "Emby 分离 HTTP 推流" ;;
     emby_https) echo "Emby 分离 HTTPS 推流" ;;
-    emby_lily) echo "LilyEmby 方案三" ;;
+    emby_lily) echo "LilyEmby 方案（访问/推流分离）" ;;
     *) echo "$1" ;;
   esac
 }
@@ -598,7 +598,7 @@ select_external_mode() {
   echo "2) Stream 模式" >&2
   echo "3) Emby 分离 HTTP 推流" >&2
   echo "4) Emby 分离 HTTPS 推流" >&2
-  echo "5) LilyEmby 方案三" >&2
+  echo "5) LilyEmby 方案（访问/推流分离）" >&2
 
   case "$current" in
     normal) choice="1" ;;
