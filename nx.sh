@@ -561,10 +561,49 @@ conf_meta_get() {
 
 url_host() {
   local url="$1"
+
+  # Extract host part from URL, including IPv6-in-brackets.
+  # Examples:
+  #   http://example.com:8080/path   -> example.com
+  #   https://1.2.3.4/path           -> 1.2.3.4
+  #   http://[2001:db8::1]:8080/     -> 2001:db8::1
   url="${url#*://}"
-  url="${url%%/*}"
+  url="${url%%/*}" # authority
+
+  if [[ "$url" == \[*\]* ]]; then
+    # If no port, authority may look like: [2001:db8::1]
+    # If with port: [2001:db8::1]:8080
+    url="${url#[}"
+    url="${url%%]*}"
+    echo "$url"
+    return 0
+  fi
+
   url="${url%%:*}"
   echo "$url"
+}
+
+ipv6_available() {
+  # Best-effort detection: kernel IPv6 enabled and has at least one interface entry.
+  [[ -f /proc/net/if_inet6 ]] || return 1
+  [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" == "0" ]] || return 1
+  return 0
+}
+
+nginx_listen_ipv6_line() {
+  # Print an additional IPv6 listen line for a given port, if IPv6 is available.
+  # Usage: nginx_listen_ipv6_line 80 ""  -> "    listen [::]:80;"
+  #        nginx_listen_ipv6_line 443 "ssl" -> "    listen [::]:443 ssl;"
+  local p="$1"
+  local flags="${2:-}"
+
+  if ipv6_available; then
+    if [[ -n "$flags" ]]; then
+      echo "    listen [::]:${p} ${flags};"
+    else
+      echo "    listen [::]:${p};"
+    fi
+  fi
 }
 
 url_scheme() {
@@ -653,6 +692,9 @@ build_proxy_conf() {
   local backend_port="$3"
   local out="$4"
 
+  local ipv6_listen
+  ipv6_listen="$(nginx_listen_ipv6_line "$listen_port" "")"
+
   cat > "$out" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
@@ -661,6 +703,7 @@ build_proxy_conf() {
 
 server {
     listen ${listen_port};
+${ipv6_listen}
     server_name ${domain};
 
     # ACME HTTP-01 验证路径（证书申请/续期）
@@ -846,6 +889,10 @@ ${main_header_block}"
   fi
 
   if [[ "$https_enabled" == "1" ]]; then
+    local ipv6_listen_80 ipv6_listen_tls
+    ipv6_listen_80="$(nginx_listen_ipv6_line 80 "")"
+    ipv6_listen_tls="$(nginx_listen_ipv6_line "$listen_port" "ssl")"
+
     cat > "$out" <<EOF
 # managed_by=Nginx-X
 # mode=external
@@ -860,6 +907,7 @@ ${https_meta}
 
 server {
     listen 80;
+${ipv6_listen_80}
     server_name ${domain};
 
     location ^~ /.well-known/acme-challenge/ {
@@ -873,6 +921,7 @@ server {
 
 server {
     listen ${listen_port} ssl;
+${ipv6_listen_tls}
     http2 on;
     server_name ${domain};
 
@@ -892,6 +941,9 @@ ${stream_location_block}
 }
 EOF
   else
+    local ipv6_listen_plain
+    ipv6_listen_plain="$(nginx_listen_ipv6_line "$listen_port" "")"
+
     cat > "$out" <<EOF
 # managed_by=Nginx-X
 # mode=external
@@ -905,6 +957,7 @@ EOF
 
 server {
     listen ${listen_port};
+${ipv6_listen_plain}
     server_name ${domain};
 
     location ^~ /.well-known/acme-challenge/ {

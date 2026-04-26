@@ -80,6 +80,17 @@ bash install.sh
    - 已导入到 `conf.d` 的配置不会被重复扫描（按域名+端口去重，含 `.bak` 等停用文件）
    - 首次安装 Nginx 后会自动检测并提示导入已有配置
 
+### IPv6 支持说明
+
+- **对外监听（客户端通过 IPv6 访问）**：脚本在生成配置时会进行最佳努力检测，若系统 IPv6 已启用，会额外写入：
+  - `listen [::]:80;`
+  - `listen [::]:443 ssl;`（或对应的 HTTPS 监听端口）
+- **上游反代到 IPv6**：支持上游 URL 使用 IPv6（需要按 URL 规范使用方括号），例如：
+  - `http://[2001:db8::1]:8080`
+  - `https://[2400:3200::1]`
+
+> 注意：若你的系统内核禁用了 IPv6（例如 `net.ipv6.conf.all.disable_ipv6=1`），脚本会自动跳过 IPv6 的 `listen` 行，避免 `nginx -t` 失败。
+
 3. **证书管理**
    - 设置邮箱（持久化到 `${XDG_CONFIG_HOME:-$HOME/.config}/nginxx/email.conf`）
    - 自动安装 acme.sh 并申请证书（HTTP 验证）
