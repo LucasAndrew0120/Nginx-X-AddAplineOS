@@ -101,9 +101,11 @@ server {
 }
 EOF
 
-if ensure_ssl_directives_present "$bad_conf"; then
+if ensure_ssl_directives_present "$bad_conf" >/dev/null 2>&1; then
   echo "expected ensure_ssl_directives_present to fail for incomplete ssl config" >&2
   exit 1
 fi
+
+echo "[OK] expected failure: ensure_ssl_directives_present blocked incomplete ssl config" >&2
 
 echo "ok"
