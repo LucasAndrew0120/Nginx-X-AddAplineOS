@@ -27,6 +27,9 @@ export PATH="$MOCK_BIN:$PATH"
 # shellcheck disable=SC1091,SC1090
 source <(sed '$d' nx.sh)
 
+# Make the test deterministic: don't depend on the host kernel IPv6 state.
+ipv6_available() { return 0; }
+
 # shellcheck disable=SC2034
 SUDO=""
 CONF_DIR="$TMPDIR_ROOT/conf.d"
@@ -46,6 +49,13 @@ build_external_proxy_conf \
 
 grep -q '^# https_enabled=true$' "$out"
 grep -q 'listen 443 ssl' "$out"
+grep -q 'listen 443 ssl http2;' "$out"
+grep -q 'listen \[::\]:443 ssl http2;' "$out"
+grep -q 'listen \[::\]:80;' "$out"
+if grep -q 'http2 on;' "$out"; then
+  echo "unexpected directive: http2 on;" >&2
+  exit 1
+fi
 # shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$out"
 grep -q "ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;" "$out"
@@ -69,8 +79,19 @@ EOF
 enable_https_for_conf_file "example.com" "$http_conf"
 grep -q '^# listen_port=443$' "$http_conf"
 grep -q 'listen 443 ssl' "$http_conf"
+grep -q 'listen 443 ssl http2;' "$http_conf"
+grep -q 'listen \[::\]:443 ssl http2;' "$http_conf"
+grep -q 'listen \[::\]:80;' "$http_conf"
+if grep -q 'http2 on;' "$http_conf"; then
+  echo "unexpected directive: http2 on;" >&2
+  exit 1
+fi
 # shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$http_conf"
+
+# URL parsing: IPv6 host extraction should handle bracketed addresses.
+[[ "$(url_host 'http://[2001:db8::1]:8080/path')" == "2001:db8::1" ]]
+[[ "$(url_host 'https://example.com:8443/a/b')" == "example.com" ]]
 
 bad_conf="$TMPDIR_ROOT/bad.conf"
 cat > "$bad_conf" <<'EOF'
