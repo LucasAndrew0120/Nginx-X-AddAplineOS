@@ -18,10 +18,11 @@ jobs:
         run: |
           bash -n nx.sh
           bash -n install.sh
+          bash -n tests/https_config_regression.sh
 
       - name: ShellCheck
         run: |
-          shellcheck -x nx.sh install.sh
+          shellcheck -x nx.sh install.sh tests/https_config_regression.sh
 
       - name: Run regression tests
         run: |
