@@ -45,7 +45,7 @@ build_external_proxy_conf \
   "1"
 
 grep -q '^# https_enabled=true$' "$out"
-grep -q 'listen 443 ssl;' "$out"
+grep -q 'listen 443 ssl' "$out"
 # shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$out"
 grep -q "ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;" "$out"
@@ -68,7 +68,7 @@ EOF
 
 enable_https_for_conf_file "example.com" "$http_conf"
 grep -q '^# listen_port=443$' "$http_conf"
-grep -q 'listen 443 ssl;' "$http_conf"
+grep -q 'listen 443 ssl' "$http_conf"
 # shellcheck disable=SC2016
 grep -Fq 'return 301 https://$host$request_uri;' "$http_conf"
 

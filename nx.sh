@@ -593,7 +593,7 @@ ipv6_available() {
 nginx_listen_ipv6_line() {
   # Print an additional IPv6 listen line for a given port, if IPv6 is available.
   # Usage: nginx_listen_ipv6_line 80 ""  -> "    listen [::]:80;"
-  #        nginx_listen_ipv6_line 443 "ssl" -> "    listen [::]:443 ssl;"
+  #        nginx_listen_ipv6_line 443 "ssl http2" -> "    listen [::]:443 ssl http2;"
   local p="$1"
   local flags="${2:-}"
 
@@ -891,7 +891,7 @@ ${main_header_block}"
   if [[ "$https_enabled" == "1" ]]; then
     local ipv6_listen_80 ipv6_listen_tls
     ipv6_listen_80="$(nginx_listen_ipv6_line 80 "")"
-    ipv6_listen_tls="$(nginx_listen_ipv6_line "$listen_port" "ssl")"
+    ipv6_listen_tls="$(nginx_listen_ipv6_line "$listen_port" "ssl http2")"
 
     cat > "$out" <<EOF
 # managed_by=Nginx-X
@@ -920,9 +920,8 @@ ${ipv6_listen_80}
 }
 
 server {
-    listen ${listen_port} ssl;
+    listen ${listen_port} ssl http2;
 ${ipv6_listen_tls}
-    http2 on;
     server_name ${domain};
 
 ${https_cert_block}
@@ -3103,6 +3102,10 @@ BLOCK
   fi
 
   # 生成 HTTPS 配置：若原配置监听 80，则自动切到标准 443，避免 80 同时承担重定向与 SSL 监听
+  local ipv6_listen_80 ipv6_listen_tls
+  ipv6_listen_80="$(nginx_listen_ipv6_line 80 "")"
+  ipv6_listen_tls="$(nginx_listen_ipv6_line "$effective_https_port" "ssl http2")"
+
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
 # domain=${domain}
@@ -3112,6 +3115,7 @@ BLOCK
 
 server {
     listen 80;
+${ipv6_listen_80}
     server_name ${domain};
 
     # 保留 ACME 验证路径，避免被 301 跳转影响签发/续期
@@ -3125,8 +3129,8 @@ server {
 }
 
 server {
-    listen ${effective_https_port} ssl;
-    http2 on;
+    listen ${effective_https_port} ssl http2;
+${ipv6_listen_tls}
     server_name ${domain};
 
     ssl_certificate     ${SSL_DIR}/${domain}/fullchain.pem;
