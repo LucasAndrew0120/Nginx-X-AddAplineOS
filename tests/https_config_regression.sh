@@ -93,6 +93,30 @@ grep -Fq 'return 301 https://$host$request_uri;' "$http_conf"
 [[ "$(url_host 'http://[2001:db8::1]:8080/path')" == "2001:db8::1" ]]
 [[ "$(url_host 'https://example.com:8443/a/b')" == "example.com" ]]
 
+# Emby/Lily split-proxy mode should support multiple stream upstreams.
+multi_stream_conf="$TMPDIR_ROOT/emby-multi-stream.conf"
+stream_urls="$(normalize_url_list 'https://stream-a.example.com, https://stream-b.example.com')"
+build_external_proxy_conf \
+  "emby.example.com" \
+  "80" \
+  "https://main.example.com" \
+  "emby_lily" \
+  "$multi_stream_conf" \
+  "0" \
+  "https://stream-a.example.com" \
+  "https://main.example.com" \
+  "" \
+  "$stream_urls"
+
+grep -q '^# stream_upstream_url=https://stream-a.example.com$' "$multi_stream_conf"
+grep -q '^# stream_upstream_urls=https://stream-a.example.com|https://stream-b.example.com$' "$multi_stream_conf"
+grep -q 'location /s1/' "$multi_stream_conf"
+grep -q 'location /s2/' "$multi_stream_conf"
+grep -q 'proxy_pass https://stream-a.example.com;' "$multi_stream_conf"
+grep -q 'proxy_pass https://stream-b.example.com;' "$multi_stream_conf"
+grep -q "sub_filter 'https://stream-a.example.com' 'https://emby.example.com/s1';" "$multi_stream_conf"
+grep -q "sub_filter 'https://stream-b.example.com' 'https://emby.example.com/s2';" "$multi_stream_conf"
+
 bad_conf="$TMPDIR_ROOT/bad.conf"
 cat > "$bad_conf" <<'EOF'
 server {

@@ -617,6 +617,41 @@ default_referer_from_url() {
   echo "${base}/web/index.html"
 }
 
+trim_spaces() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  echo "$v"
+}
+
+normalize_url_list() {
+  local raw="$1"
+  local -a parts
+  local part out=""
+
+  IFS=',' read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    part="$(trim_spaces "$part")"
+    [[ -z "$part" ]] && continue
+    if ! valid_url "$part"; then
+      return 1
+    fi
+    out+="${out:+|}${part}"
+  done
+
+  [[ -n "$out" ]] || return 1
+  echo "$out"
+}
+
+stream_urls_to_array() {
+  local raw="$1"
+  local -n _out="$2"
+
+  _out=()
+  [[ -z "$raw" ]] && return 0
+  IFS='|' read -r -a _out <<< "$raw"
+}
+
 external_mode_name() {
   case "$1" in
     normal) echo "标准模式" ;;
@@ -741,6 +776,7 @@ build_external_proxy_conf() {
   local stream_upstream_url="${7:-}"
   local source_site_url="${8:-}"
   local referer_url="${9:-}"
+  local stream_upstream_urls="${10:-}"
   local main_stream_block=""
   local stream_location_block=""
   local lily_block=""
@@ -749,10 +785,24 @@ build_external_proxy_conf() {
   local main_header_block=""
   local stream_sni_block=""
   local redirect_suffix=""
-  local upstream_host stream_host https_meta https_cert_block
+  local upstream_host https_meta https_cert_block
+  local -a stream_urls=()
+  local idx stream_url stream_path stream_host_line stream_redirect_block=""
+  local stream_lily_block="" base_lily_block=""
 
   upstream_host="$(url_host "$upstream_url")"
-  stream_host="$(url_host "$stream_upstream_url")"
+
+  if [[ -n "$stream_upstream_urls" ]]; then
+    stream_urls=()
+    stream_urls_to_array "$stream_upstream_urls" stream_urls
+  elif [[ -n "$stream_upstream_url" ]]; then
+    stream_urls=("$stream_upstream_url")
+  fi
+
+  if [[ ${#stream_urls[@]} -gt 0 ]]; then
+    stream_upstream_url="${stream_urls[0]}"
+    stream_upstream_urls="$(IFS='|'; echo "${stream_urls[*]}")"
+  fi
 
   [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
   [[ -z "$referer_url" && -n "$source_site_url" ]] && referer_url="$(default_referer_from_url "$source_site_url")"
@@ -785,58 +835,76 @@ BLOCK
 )
       ;;
     emby_http|emby_https|emby_lily)
-      redirect_block="        proxy_redirect ${stream_upstream_url} https://${domain}/s1/;"
+      if [[ ${#stream_urls[@]} -eq 0 ]]; then
+        stream_urls=("$stream_upstream_url")
+      fi
+
+      for idx in "${!stream_urls[@]}"; do
+        stream_url="${stream_urls[$idx]}"
+        stream_path="/s$((idx + 1))/"
+        stream_host_line="$(url_host "$stream_url")"
+        stream_redirect_block+="        proxy_redirect ${stream_url} https://${domain}${stream_path};"$'\n'
+
+        if [[ "$external_mode" == "emby_lily" ]]; then
+          stream_lily_block+="        sub_filter '${stream_url}' 'https://${domain}${stream_path%/}';"$'\n'
+        fi
+
+        stream_sni_block=""
+        if [[ "$external_mode" != "emby_http" ]]; then
+          stream_sni_block=$(cat <<EOF
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${stream_host_line};
+EOF
+)
+        fi
+
+        stream_location_block+=$'\n'
+        stream_location_block+="    location ${stream_path} {"$'\n'
+        stream_location_block+="        rewrite ^${stream_path%/}(/.*)\$ \$1 break;"$'\n'
+        stream_location_block+="        proxy_pass ${stream_url};"$'\n'
+        stream_location_block+="        proxy_http_version 1.1;"$'\n'
+        if [[ -n "$stream_sni_block" ]]; then
+          stream_location_block+="${stream_sni_block}"$'\n'
+        fi
+        stream_location_block+="        proxy_set_header Range \$http_range;"$'\n'
+        stream_location_block+="        proxy_set_header If-Range \$http_if_range;"$'\n'
+        stream_location_block+="        proxy_set_header Referer \"${referer_url}\";"$'\n'
+        stream_location_block+="        proxy_set_header Host \$proxy_host;"$'\n'
+        stream_location_block+=$'\n'
+        stream_location_block+="        proxy_buffering off;"$'\n'
+        stream_location_block+="        proxy_connect_timeout 60s;"$'\n'
+        stream_location_block+="        proxy_read_timeout 300s;"$'\n'
+        stream_location_block+="        proxy_send_timeout 300s;"$'\n'
+        stream_location_block+=$'\n'
+        stream_location_block+="        proxy_set_header X-Real-IP \"\";"$'\n'
+        stream_location_block+="        proxy_set_header X-Forwarded-For \"\";"$'\n'
+        stream_location_block+="        proxy_set_header X-Forwarded-Proto \"\";"$'\n'
+        stream_location_block+="        proxy_set_header X-Forwarded-Host \"\";"$'\n'
+        stream_location_block+="        proxy_set_header Forwarded \"\";"$'\n'
+        stream_location_block+="        proxy_set_header Via \"\";"$'\n'
+        stream_location_block+=$'\n'
+        stream_location_block+="        proxy_hide_header X-Powered-By;"$'\n'
+        stream_location_block+="        proxy_hide_header X-Frame-Options;"$'\n'
+        stream_location_block+="        proxy_hide_header X-Content-Type-Options;"$'\n'
+        stream_location_block+="    }"$'\n'
+      done
+
+      redirect_block="${stream_redirect_block%$'\n'}"
       if [[ "$external_mode" == "emby_lily" ]]; then
         redirect_block+=$'\n'
         redirect_block+="        proxy_redirect ${source_site_url} https://${domain};"
-        lily_block=$(cat <<EOF
+        base_lily_block=$(cat <<EOF
         proxy_set_header Accept-Encoding "";
         sub_filter_types application/json text/xml text/plain;
         sub_filter_once off;
         sub_filter '${source_site_url}' 'https://${domain}';
-        sub_filter '${stream_upstream_url}' 'https://${domain}/s1';
 EOF
 )
+        lily_block="${base_lily_block}"$'\n'"${stream_lily_block}"
+      else
+        lily_block="${stream_lily_block}"
       fi
 
-      if [[ "$external_mode" != "emby_http" ]]; then
-        stream_sni_block=$(cat <<EOF
-        proxy_ssl_server_name on;
-        proxy_ssl_name ${stream_host};
-EOF
-)
-      fi
-
-      stream_location_block=$(cat <<EOF
-
-    location /s1/ {
-        rewrite ^/s1(/.*)\$ \$1 break;
-        proxy_pass ${stream_upstream_url};
-        proxy_http_version 1.1;
-${stream_sni_block}
-        proxy_set_header Range \$http_range;
-        proxy_set_header If-Range \$http_if_range;
-        proxy_set_header Referer "${referer_url}";
-        proxy_set_header Host \$proxy_host;
-
-        proxy_buffering off;
-        proxy_connect_timeout 60s;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-
-        proxy_set_header X-Real-IP "";
-        proxy_set_header X-Forwarded-For "";
-        proxy_set_header X-Forwarded-Proto "";
-        proxy_set_header X-Forwarded-Host "";
-        proxy_set_header Forwarded "";
-        proxy_set_header Via "";
-
-        proxy_hide_header X-Powered-By;
-        proxy_hide_header X-Frame-Options;
-        proxy_hide_header X-Content-Type-Options;
-    }
-EOF
-)
       ;;
   esac
 
@@ -902,6 +970,7 @@ ${main_header_block}"
 ${https_meta}
 # upstream_url=${upstream_url}
 # stream_upstream_url=${stream_upstream_url}
+# stream_upstream_urls=${stream_upstream_urls}
 # source_site_url=${source_site_url}
 # referer_url=${referer_url}
 
@@ -951,6 +1020,7 @@ EOF
 # listen_port=${listen_port}
 # upstream_url=${upstream_url}
 # stream_upstream_url=${stream_upstream_url}
+# stream_upstream_urls=${stream_upstream_urls}
 # source_site_url=${source_site_url}
 # referer_url=${referer_url}
 
@@ -1153,7 +1223,7 @@ add_reverse_proxy() {
 
 add_external_url_proxy() {
   local domain listen_port upstream_url target tmp external_mode
-  local stream_upstream_url="" source_site_url="" referer_url=""
+  local stream_upstream_url="" stream_upstream_urls="" source_site_url="" referer_url=""
   local desired_port create_port force_enable_https="0"
 
   require_nginx_installed || return 1
@@ -1182,11 +1252,14 @@ add_external_url_proxy() {
   external_mode="$(select_external_mode normal)"
 
   if [[ "$external_mode" =~ ^emby_ ]]; then
-    read -rp "请输入推流节点 URL（http/https）: " stream_upstream_url
-    if ! valid_url "$stream_upstream_url"; then
+    read -rp "请输入推流节点 URL（多个可用英文逗号分隔）: " stream_upstream_url
+    if ! stream_upstream_urls="$(normalize_url_list "$stream_upstream_url")"; then
       error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
+    local -a _stream_urls
+    IFS='|' read -r -a _stream_urls <<< "$stream_upstream_urls"
+    stream_upstream_url="${_stream_urls[0]}"
 
     read -rp "请输入源站公开 URL（用于重定向/替换，默认与主上游相同）: " source_site_url
     [[ -z "$source_site_url" ]] && source_site_url="$upstream_url"
@@ -1230,7 +1303,7 @@ add_external_url_proxy() {
   tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
   trap 'rm -f "${tmp:-}"' RETURN
 
-  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
+  build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
   if apply_conf_with_rollback "$tmp" "$target"; then
     info "外部反代配置已生效：${target}"
 
@@ -1506,8 +1579,8 @@ modify_conf() {
 
 modify_external_conf() {
   local file src current_domain current_listen current_upstream_url current_mode
-  local current_stream_upstream_url current_source_site_url current_referer_url
-  local new_domain new_listen new_upstream_url new_mode new_stream_upstream_url new_source_site_url new_referer_url
+  local current_stream_upstream_url current_stream_upstream_urls current_source_site_url current_referer_url
+  local new_domain new_listen new_upstream_url new_mode new_stream_upstream_url new_stream_upstream_urls new_source_site_url new_referer_url
   local tmp new_target desired_port create_port force_enable_https="0"
   local was_https_enabled=0 was_disabled=0 domain_changed=0
 
@@ -1523,6 +1596,7 @@ modify_external_conf() {
   current_upstream_url="$(conf_meta_get "$src" upstream_url)"
   current_mode="$(conf_meta_get "$src" external_mode)"
   current_stream_upstream_url="$(conf_meta_get "$src" stream_upstream_url)"
+  current_stream_upstream_urls="$(conf_meta_get "$src" stream_upstream_urls)"
   current_source_site_url="$(conf_meta_get "$src" source_site_url)"
   current_referer_url="$(conf_meta_get "$src" referer_url)"
 
@@ -1559,16 +1633,31 @@ modify_external_conf() {
   new_mode="$(select_external_mode "$current_mode")"
 
   new_stream_upstream_url="$current_stream_upstream_url"
+  new_stream_upstream_urls="$current_stream_upstream_urls"
   new_source_site_url="$current_source_site_url"
   new_referer_url="$current_referer_url"
 
   if [[ "$new_mode" =~ ^emby_ ]]; then
-    read -rp "新的推流节点 URL（当前 ${current_stream_upstream_url:-未设置}）: " input_stream
-    [[ -n "$input_stream" ]] && new_stream_upstream_url="$input_stream"
-    if ! valid_url "$new_stream_upstream_url"; then
+    local current_stream_display="${current_stream_upstream_urls:-$current_stream_upstream_url}"
+    [[ -z "$current_stream_display" ]] && current_stream_display="未设置"
+    read -rp "新的推流节点 URL（多个可用英文逗号分隔，当前 ${current_stream_display}）: " input_stream
+    if [[ -n "$input_stream" ]]; then
+      if ! new_stream_upstream_urls="$(normalize_url_list "$input_stream")"; then
+        error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
+        return 1
+      fi
+    elif [[ -n "$new_stream_upstream_urls" ]]; then
+      :
+    elif [[ -n "$new_stream_upstream_url" ]]; then
+      new_stream_upstream_urls="$new_stream_upstream_url"
+    else
       error "推流节点 URL 格式不合法。必须以 http:// 或 https:// 开头，且不含特殊字符。"
       return 1
     fi
+
+    local -a _stream_urls
+    IFS='|' read -r -a _stream_urls <<< "$new_stream_upstream_urls"
+    new_stream_upstream_url="${_stream_urls[0]}"
 
     read -rp "新的源站公开 URL（当前 ${current_source_site_url:-$new_upstream_url}）: " input_source
     [[ -n "$input_source" ]] && new_source_site_url="$input_source"
@@ -1583,6 +1672,7 @@ modify_external_conf() {
     [[ -z "$new_referer_url" ]] && new_referer_url="$(default_referer_from_url "$new_source_site_url")"
   else
     new_stream_upstream_url=""
+    new_stream_upstream_urls=""
     new_source_site_url=""
     new_referer_url=""
   fi
@@ -1620,7 +1710,7 @@ modify_external_conf() {
   new_target="$(conf_target_path "$new_domain" "$desired_port")"
   tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}".XXXXXX.conf)"
   trap 'rm -f "${tmp:-}"' RETURN
-  build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url"
+  build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls"
 
   if apply_conf_with_rollback "$tmp" "$new_target"; then
     if [[ "$src" != "$new_target" && -f "$src" ]]; then
@@ -2598,10 +2688,12 @@ health_probe_url() {
 
 health_check_conf_file() {
   local conf_file="$1"
-  local domain listen_port mode upstream_url stream_upstream_url
+  local domain listen_port mode upstream_url stream_upstream_url stream_upstream_urls
   local scheme target_url status_label http_code remote_ip dns_ips tls_days verify_result effective_url
   local upstream_http_code upstream_verify_result upstream_status
   local stream_http_code stream_verify_result stream_status
+  local -a stream_urls=()
+  local idx prefix
   local status_ok=0
 
   domain="$(extract_domain_from_conf "$conf_file")"
@@ -2609,6 +2701,7 @@ health_check_conf_file() {
   mode="$(conf_meta_get "$conf_file" mode)"
   upstream_url="$(conf_meta_get "$conf_file" upstream_url)"
   stream_upstream_url="$(conf_meta_get "$conf_file" stream_upstream_url)"
+  stream_upstream_urls="$(conf_meta_get "$conf_file" stream_upstream_urls)"
   [[ -z "$listen_port" ]] && listen_port="80"
 
   if conf_https_enabled "$conf_file"; then
@@ -2668,18 +2761,30 @@ health_check_conf_file() {
     fi
   fi
 
+  if [[ -n "$stream_upstream_urls" ]]; then
+    stream_urls_to_array "$stream_upstream_urls" stream_urls
+  elif [[ -n "$stream_upstream_url" ]]; then
+    stream_urls=("$stream_upstream_url")
+  fi
+
   stream_status="-"
-  if [[ -n "$stream_upstream_url" ]]; then
-    IFS='|' read -r stream_http_code _ _ stream_verify_result <<< "$(health_probe_url "$stream_upstream_url" 0)"
-    if [[ "$stream_http_code" =~ ^[23] ]]; then
-      stream_status="正常"
-    elif [[ "$(url_scheme "$stream_upstream_url")" == "https" && "$stream_verify_result" != "0" ]]; then
-      stream_status="证书校验失败"
-      (( status_ok < 1 )) && status_ok=1
-    else
-      stream_status="异常(${stream_http_code})"
-      (( status_ok < 1 )) && status_ok=1
-    fi
+  if [[ ${#stream_urls[@]} -gt 0 ]]; then
+    stream_status=""
+    for idx in "${!stream_urls[@]}"; do
+      stream_upstream_url="${stream_urls[$idx]}"
+      IFS='|' read -r stream_http_code _ _ stream_verify_result <<< "$(health_probe_url "$stream_upstream_url" 0)"
+      prefix=""
+      [[ -n "$stream_status" ]] && prefix=" | "
+      if [[ "$stream_http_code" =~ ^[23] ]]; then
+        stream_status+="${prefix}正常"
+      elif [[ "$(url_scheme "$stream_upstream_url")" == "https" && "$stream_verify_result" != "0" ]]; then
+        stream_status+="${prefix}证书校验失败"
+        (( status_ok < 1 )) && status_ok=1
+      else
+        stream_status+="${prefix}异常(${stream_http_code})"
+        (( status_ok < 1 )) && status_ok=1
+      fi
+    done
   fi
 
   echo "- $(basename "$conf_file")"
@@ -2696,8 +2801,12 @@ health_check_conf_file() {
   if [[ "$mode" == "external" ]]; then
     echo "  主上游: ${upstream_url}"
     echo "  主上游状态: ${upstream_status}"
-    if [[ -n "$stream_upstream_url" ]]; then
-      echo "  推流上游: ${stream_upstream_url}"
+    if [[ ${#stream_urls[@]} -gt 0 ]]; then
+      if [[ ${#stream_urls[@]} -eq 1 ]]; then
+        echo "  推流上游: ${stream_urls[0]}"
+      else
+        echo "  推流上游: ${stream_urls[*]}"
+      fi
       echo "  推流上游状态: ${stream_status}"
     fi
   else
@@ -2784,6 +2893,7 @@ disable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
   local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
+  local stream_upstream_urls
   local listen_port existing_upstream host_header ssl_sni_line stream_mode stream_block tmp
 
   mode="$(conf_meta_get "$conf_file" mode)"
@@ -2793,13 +2903,14 @@ disable_https_for_conf_file() {
     external_mode="$(conf_meta_get "$conf_file" external_mode)"
     upstream_url="$(conf_meta_get "$conf_file" upstream_url)"
     stream_upstream_url="$(conf_meta_get "$conf_file" stream_upstream_url)"
+    stream_upstream_urls="$(conf_meta_get "$conf_file" stream_upstream_urls)"
     source_site_url="$(conf_meta_get "$conf_file" source_site_url)"
     referer_url="$(conf_meta_get "$conf_file" referer_url)"
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
     trap 'rm -f "${tmp:-}"' RETURN
-    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
       info "HTTPS 已停用：$(basename "$conf_file")"
       rm -f "$tmp"
@@ -3001,7 +3112,7 @@ enable_https_for_conf_file() {
   local domain="$1"
   local conf_file="$2"
   local force_port="${3:-}"
-  local mode external_mode upstream_url stream_upstream_url source_site_url referer_url
+  local mode external_mode upstream_url stream_upstream_url stream_upstream_urls source_site_url referer_url
   local tmp listen_port redirect_suffix stream_mode stream_block effective_https_port
 
   if [[ ! -f "$conf_file" ]]; then
@@ -3029,13 +3140,14 @@ enable_https_for_conf_file() {
     external_mode="$(conf_meta_get "$conf_file" external_mode)"
     upstream_url="$(conf_meta_get "$conf_file" upstream_url)"
     stream_upstream_url="$(conf_meta_get "$conf_file" stream_upstream_url)"
+    stream_upstream_urls="$(conf_meta_get "$conf_file" stream_upstream_urls)"
     source_site_url="$(conf_meta_get "$conf_file" source_site_url)"
     referer_url="$(conf_meta_get "$conf_file" referer_url)"
     [[ -z "$external_mode" ]] && external_mode="normal"
 
     tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
     trap 'rm -f "${tmp:-}"' RETURN
-    build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url"
+    build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
       info "HTTPS 已启用，且已配置 80 -> ${effective_https_port} 强制跳转。"
       rm -f "$tmp"

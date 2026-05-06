@@ -63,7 +63,7 @@ bash install.sh
      - `Emby 分离 HTTP 推流`
      - `Emby 分离 HTTPS 推流`
      - `LilyEmby 方案（访问/推流分离，支持 sub_filter 响应体替换）`
-   - Emby/Lily 模式支持配置主站上游、推流节点 URL、源站公开 URL、Referer URL
+   - Emby/Lily 模式支持配置主站上游、一个或多个推流节点 URL（多个用英文逗号分隔）、源站公开 URL、Referer URL
    - 同端口多域名场景自动适配：若目标端口已用于 HTTPS，会自动处理为可通过 `nginx -t` 的流程
    - 自动生成标准 Proxy Header，配置写入 `/etc/nginx/conf.d/域名-监听端口.conf`
    - 配置列表中的“修改”支持外部反代配置切换方案，并保留证书/HTTPS 联动逻辑
@@ -111,7 +111,7 @@ bash install.sh
    - 健康检查支持 `检查所有站点` / `检查单个站点`
    - 健康检查内容包括：入口 URL、HTTP 状态码、DNS 解析结果、命中 IP
    - HTTPS 站点会额外显示证书剩余天数（可获取时）
-   - 外部反代会额外显示主上游与推流上游，便于排查
+   - 外部反代会额外显示主上游与推流上游（支持多个推流上游），便于排查
    - 每 5 秒自动刷新，按回车返回上一级
 
 5. **卸载**
