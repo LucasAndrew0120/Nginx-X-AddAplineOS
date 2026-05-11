@@ -743,6 +743,8 @@ build_proxy_conf() {
   local backend_port="$3"
   local out="$4"
 
+  ensure_websocket_map
+
   local ipv6_listen
   ipv6_listen="$(nginx_listen_ipv6_line "$listen_port" "")"
 
@@ -777,6 +779,9 @@ ${ipv6_listen}
 
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 EOF
@@ -792,6 +797,8 @@ build_external_proxy_conf() {
   local stream_upstream_url="${7:-}"
   local source_site_url="${8:-}"
   local referer_url="${9:-}"
+
+  ensure_websocket_map
   local stream_upstream_urls="${10:-}"
   local main_stream_block=""
   local stream_location_block=""
@@ -1020,6 +1027,9 @@ ${main_host_block}
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 ${stream_location_block}
 }
@@ -1060,6 +1070,9 @@ ${main_host_block}
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 ${stream_location_block}
 }
@@ -2912,6 +2925,8 @@ disable_https_for_conf_file() {
   local stream_upstream_urls
   local listen_port existing_upstream host_header ssl_sni_line stream_mode stream_block tmp
 
+  ensure_websocket_map
+
   mode="$(conf_meta_get "$conf_file" mode)"
   if [[ "$mode" == "external" ]]; then
     listen_port="$(conf_meta_get "$conf_file" listen_port)"
@@ -3009,6 +3024,9 @@ ${ssl_sni_line}
 
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 EOF
@@ -3130,6 +3148,8 @@ enable_https_for_conf_file() {
   local force_port="${3:-}"
   local mode external_mode upstream_url stream_upstream_url stream_upstream_urls source_site_url referer_url
   local tmp listen_port redirect_suffix stream_mode stream_block effective_https_port
+
+  ensure_websocket_map
 
   if [[ ! -f "$conf_file" ]]; then
     error "配置文件不存在：${conf_file}"
@@ -3283,6 +3303,9 @@ ${ssl_sni_line}
 
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 EOF
