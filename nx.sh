@@ -138,6 +138,22 @@ ensure_dirs() {
   ${SUDO} mkdir -p "$SSL_DIR"
 }
 
+# 写入 WebSocket upgrade map，避免对普通 HTTP 请求发送固定 Connection: upgrade
+ensure_websocket_map() {
+  local map_conf="${CONF_DIR}/00-websocket-map.conf"
+  if [[ ! -f "$map_conf" ]]; then
+    ${SUDO} tee "$map_conf" > /dev/null <<'EOF'
+# managed_by=Nginx-X
+# WebSocket upgrade map — included by all proxy configs via conf.d
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+EOF
+    info "已写入 WebSocket map：${map_conf}"
+  fi
+}
+
 ensure_state_dir() {
   mkdir -p "$STATE_DIR"
 }
@@ -760,7 +776,7 @@ ${ipv6_listen}
         proxy_set_header X-Forwarded-Port \$server_port;
 
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
     }
 }
 EOF
@@ -1003,7 +1019,7 @@ ${main_host_block}
 
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
     }
 ${stream_location_block}
 }
@@ -1043,7 +1059,7 @@ ${main_host_block}
 
 ${main_header_block}
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
     }
 ${stream_location_block}
 }
@@ -2992,7 +3008,7 @@ ${ssl_sni_line}
         proxy_set_header X-Forwarded-Port \$server_port;
 
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
     }
 }
 EOF
@@ -3266,7 +3282,7 @@ ${ssl_sni_line}
         proxy_set_header X-Forwarded-Port \$server_port;
 
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$connection_upgrade;
     }
 }
 EOF
@@ -3729,6 +3745,7 @@ main_menu() {
 
 main() {
   ensure_dirs
+  ensure_websocket_map
 
   while true; do
     banner
