@@ -850,8 +850,6 @@ EOF
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_max_temp_file_size 0;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
         send_timeout 3600s;
         client_max_body_size 0;
 BLOCK
@@ -2963,8 +2961,6 @@ disable_https_for_conf_file() {
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_max_temp_file_size 0;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
         send_timeout 3600s;
         client_max_body_size 0;
 BLOCK
@@ -3208,8 +3204,6 @@ enable_https_for_conf_file() {
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_max_temp_file_size 0;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
         send_timeout 3600s;
         client_max_body_size 0;
 BLOCK

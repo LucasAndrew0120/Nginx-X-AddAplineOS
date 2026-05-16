@@ -61,6 +61,19 @@ grep -Fq 'return 301 https://$host$request_uri;' "$out"
 grep -q "ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;" "$out"
 grep -q "ssl_certificate_key ${SSL_DIR}/example.com/privkey.pem;" "$out"
 
+# Stream mode must not duplicate timeout directives in the same location.
+stream_conf="$TMPDIR_ROOT/stream-443.conf"
+build_external_proxy_conf \
+  "stream.example.com" \
+  "443" \
+  "https://free.lilyemby.com" \
+  "media" \
+  "$stream_conf" \
+  "0"
+
+[[ "$(grep -c 'proxy_read_timeout' "$stream_conf")" -eq 1 ]]
+[[ "$(grep -c 'proxy_send_timeout' "$stream_conf")" -eq 1 ]]
+
 http_conf="$TMPDIR_ROOT/http-80.conf"
 cat > "$http_conf" <<'EOF'
 # managed_by=Nginx-X
