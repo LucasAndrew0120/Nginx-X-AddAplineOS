@@ -575,6 +575,66 @@ conf_meta_get() {
   grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//" || true
 }
 
+conf_server_block_count() {
+  local conf_file="$1"
+  grep -cE '^[[:space:]]*server[[:space:]]*\{' "$conf_file" 2>/dev/null || true
+}
+
+conf_has_custom_locations() {
+  local conf_file="$1"
+
+  # Nginx-X template rebuilds are only safe for locations it can regenerate.
+  # Treat any extra custom location as user-authored logic and avoid silently
+  # deleting it during modify/HTTPS toggle operations.
+  awk '
+    /^[[:space:]]*location[[:space:]]+/ {
+      line=$0
+      if (line ~ /^[[:space:]]*location[[:space:]]+\/[[:space:]]*\{/) next
+      if (line ~ /^[[:space:]]*location[[:space:]]+\^~[[:space:]]+\/\.well-known\/acme-challenge\/[[:space:]]*\{/) next
+      if (line ~ /^[[:space:]]*location[[:space:]]+\/s[0-9]+\/[[:space:]]*\{/) next
+      bad=1
+    }
+    END { exit bad ? 0 : 1 }
+  ' "$conf_file" 2>/dev/null
+}
+
+conf_safe_for_template_rebuild() {
+  local conf_file="$1"
+  local servers
+
+  [[ "$(conf_meta_get "$conf_file" imported)" == "true" ]] && return 1
+
+  servers="$(conf_server_block_count "$conf_file")"
+  [[ -z "$servers" ]] && servers=0
+  (( servers <= 2 )) || return 1
+
+  if conf_has_custom_locations "$conf_file"; then
+    return 1
+  fi
+
+  return 0
+}
+
+require_template_rebuild_safe() {
+  local conf_file="$1"
+  local action_name="$2"
+
+  if conf_safe_for_template_rebuild "$conf_file"; then
+    return 0
+  fi
+
+  warn "已阻止${action_name}：该配置可能是导入/手工编辑/复杂配置。"
+  warn "此操作会按模板重建整份配置，可能删除自定义 location、header、rewrite、鉴权等规则。"
+  warn "请使用 '编辑' 手动调整，或先拆分/整理为 Nginx-X 原生生成的单站点配置。"
+  return 1
+}
+
+cert_referenced_confs() {
+  local domain="$1"
+  grep -R -l -E "^[[:space:]]*ssl_certificate(_key)?[[:space:]]+.*${SSL_DIR}/${domain}/" \
+    "${CONF_DIR}"/*.conf "${CONF_DIR}"/*.conf.* 2>/dev/null || true
+}
+
 url_host() {
   local url="$1"
 
@@ -1386,15 +1446,15 @@ list_managed_conf_files() {
 
   if [[ "$include_disabled" == "1" ]]; then
     find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) \
-      ! -name 'nginx_status.conf' \
-      ! -name '00-websocket-map.conf' \
-      ! -name 'acme-challenge-*.conf' \
+      ! -name 'nginx_status.conf*' \
+      ! -name '00-websocket-map.conf*' \
+      ! -name 'acme-challenge-*.conf*' \
       -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
   else
     find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' \
-      ! -name 'nginx_status.conf' \
-      ! -name '00-websocket-map.conf' \
-      ! -name 'acme-challenge-*.conf' \
+      ! -name 'nginx_status.conf*' \
+      ! -name '00-websocket-map.conf*' \
+      ! -name 'acme-challenge-*.conf*' \
       -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
   fi
 }
@@ -1494,6 +1554,8 @@ modify_conf() {
     return 1
   fi
   src="${CONF_DIR}/${file}"
+
+  require_template_rebuild_safe "$src" "修改配置" || return 1
 
   mode="$(conf_meta_get "$src" mode)"
   if [[ "$mode" == "external" ]]; then
@@ -1619,6 +1681,8 @@ modify_external_conf() {
     error "配置文件不存在：${src}"
     return 1
   }
+
+  require_template_rebuild_safe "$src" "修改外部反代配置" || return 1
 
   current_domain="$(extract_domain_from_conf "$src")"
   current_listen="$(conf_meta_get "$src" listen_port)"
@@ -2001,6 +2065,29 @@ _extract_conf_meta() {
   echo "$domain|$listen_port|$backend_url|$https_enabled|$mode"
 }
 
+validate_importable_conf() {
+  local conf="$1"
+  local servers locations
+
+  servers="$(conf_server_block_count "$conf")"
+  [[ -z "$servers" ]] && servers=0
+  if (( servers != 1 )); then
+    warn "跳过 ${conf}：检测到 ${servers} 个 server 块。"
+    warn "为避免误删/误改同文件中的其他站点，请先手动拆分为单 server 配置后再导入。"
+    return 1
+  fi
+
+  locations="$(grep -cE '^[[:space:]]*location[[:space:]]+' "$conf" 2>/dev/null || true)"
+  [[ -z "$locations" ]] && locations=0
+  if (( locations > 2 )); then
+    warn "跳过 ${conf}：检测到多个 location，可能包含自定义业务规则。"
+    warn "当前导入会整文件纳管，后续修改/HTTPS 开关可能覆盖自定义规则；请手动拆分或使用 '编辑' 维护。"
+    return 1
+  fi
+
+  return 0
+}
+
 import_single_conf() {
   local conf="$1"
   local meta domain listen_port backend_url https_enabled mode
@@ -2008,6 +2095,8 @@ import_single_conf() {
 
   meta="$(_extract_conf_meta "$conf")"
   IFS='|' read -r domain listen_port backend_url https_enabled mode <<< "$meta"
+
+  validate_importable_conf "$conf" || return 1
 
   if [[ -z "$domain" ]]; then
     warn "跳过 ${conf}：无法识别 server_name。"
@@ -2025,6 +2114,8 @@ import_single_conf() {
   meta_header+="# domain=${domain}"
   meta_header+=$'\n'
   meta_header+="# listen_port=${listen_port}"
+  meta_header+=$'\n'
+  meta_header+="# imported=true"
   if [[ -n "$backend_url" ]]; then
     local backend_port
     backend_port="$(echo "$backend_url" | grep -oP ':\K[0-9]+(?=/?$)' || true)"
@@ -2601,10 +2692,37 @@ cert_list_action_menu() {
         return 0
         ;;
       3)
+        local -a refs
+        mapfile -t refs < <(cert_referenced_confs "$domain")
+        if [[ ${#refs[@]} -gt 0 ]]; then
+          warn "证书 ${domain} 仍被以下 Nginx 配置引用，已拒绝删除："
+          local ref
+          for ref in "${refs[@]}"; do
+            warn "  - ${ref}"
+          done
+          warn "请先停用对应站点 HTTPS 或手动移除证书引用，再删除证书。"
+          pause
+          return 0
+        fi
+
         if ! confirm "确认删除证书 ${domain} ?"; then
           info "已取消。"
           pause
           return 0
+        fi
+
+        local ssl_backup="" acme_backup="" acme_ecc_backup=""
+        ssl_backup="$(mktemp -d /tmp/nginxx-cert-"${domain}".XXXXXX)"
+        if [[ -d "${SSL_DIR}/${domain}" ]]; then
+          ${SUDO} cp -a "${SSL_DIR}/${domain}" "${ssl_backup}/ssl" 2>/dev/null || true
+        fi
+        if [[ -d "$HOME/.acme.sh/${domain}" ]]; then
+          acme_backup="${ssl_backup}/acme"
+          cp -a "$HOME/.acme.sh/${domain}" "$acme_backup" 2>/dev/null || true
+        fi
+        if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]]; then
+          acme_ecc_backup="${ssl_backup}/acme_ecc"
+          cp -a "$HOME/.acme.sh/${domain}_ecc" "$acme_ecc_backup" 2>/dev/null || true
         fi
 
         if [[ -x "$HOME/.acme.sh/acme.sh" ]]; then
@@ -2612,6 +2730,29 @@ cert_list_action_menu() {
         fi
         rm -rf "$HOME/.acme.sh/${domain}" "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
         ${SUDO} rm -rf "${SSL_DIR}/${domain}" 2>/dev/null || true
+
+        if ! nginx_test; then
+          warn "删除证书后 nginx -t 失败，正在恢复证书文件。"
+          if [[ -d "${ssl_backup}/ssl" ]]; then
+            ${SUDO} mkdir -p "$SSL_DIR"
+            ${SUDO} cp -a "${ssl_backup}/ssl" "${SSL_DIR}/${domain}"
+          fi
+          if [[ -n "$acme_backup" && -d "$acme_backup" ]]; then
+            mkdir -p "$HOME/.acme.sh"
+            cp -a "$acme_backup" "$HOME/.acme.sh/${domain}" 2>/dev/null || true
+          fi
+          if [[ -n "$acme_ecc_backup" && -d "$acme_ecc_backup" ]]; then
+            mkdir -p "$HOME/.acme.sh"
+            cp -a "$acme_ecc_backup" "$HOME/.acme.sh/${domain}_ecc" 2>/dev/null || true
+          fi
+          rm -rf "$ssl_backup" 2>/dev/null || true
+          error "证书删除已回滚。请检查 nginx -t 输出后重试。"
+          ${SUDO} nginx -t || true
+          pause
+          return 1
+        fi
+
+        rm -rf "$ssl_backup" 2>/dev/null || true
         info "证书已删除：${domain}"
         pause
         return 0
@@ -2927,6 +3068,8 @@ disable_https_for_conf_file() {
 
   ensure_websocket_map
 
+  require_template_rebuild_safe "$conf_file" "停用 HTTPS" || return 1
+
   mode="$(conf_meta_get "$conf_file" mode)"
   if [[ "$mode" == "external" ]]; then
     listen_port="$(conf_meta_get "$conf_file" listen_port)"
@@ -3153,6 +3296,8 @@ enable_https_for_conf_file() {
     error "配置文件不存在：${conf_file}"
     return 1
   fi
+
+  require_template_rebuild_safe "$conf_file" "启用 HTTPS" || return 1
 
   if [[ ! -f "${SSL_DIR}/${domain}/fullchain.pem" || ! -f "${SSL_DIR}/${domain}/privkey.pem" ]]; then
     error "未找到证书文件：${SSL_DIR}/${domain}/"

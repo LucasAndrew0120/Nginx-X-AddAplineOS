@@ -61,6 +61,91 @@ grep -Fq 'return 301 https://$host$request_uri;' "$out"
 grep -q "ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;" "$out"
 grep -q "ssl_certificate_key ${SSL_DIR}/example.com/privkey.pem;" "$out"
 
+# Internal helper configs should not appear in the user-managed site list,
+# including disabled/backup variants.
+cat > "$CONF_DIR/00-websocket-map.conf.bak" <<'EOF'
+# managed_by=Nginx-X
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+EOF
+cat > "$CONF_DIR/nginx_status.conf" <<'EOF'
+# managed_by=Nginx-X
+server { listen 127.0.0.1:80; }
+EOF
+cat > "$CONF_DIR/nginx_status.conf.bak" <<'EOF'
+# managed_by=Nginx-X
+server { listen 127.0.0.1:80; }
+EOF
+cat > "$CONF_DIR/acme-challenge-example.conf.bak" <<'EOF'
+# managed_by=Nginx-X
+server { listen 80; }
+EOF
+managed_list="$(list_managed_conf_files 1)"
+if grep -Eq '00-websocket-map\.conf|nginx_status\.conf|acme-challenge-example\.conf' <<<"$managed_list"; then
+  echo "internal helper config leaked into managed config list" >&2
+  exit 1
+fi
+
+# Imported or custom-location configs should be protected from template rebuilds.
+imported_conf="$TMPDIR_ROOT/imported.conf"
+cat > "$imported_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=imported.example.com
+# listen_port=80
+# imported=true
+server {
+    listen 80;
+    server_name imported.example.com;
+    location / { proxy_pass http://127.0.0.1:3000; }
+}
+EOF
+if require_template_rebuild_safe "$imported_conf" "测试" >/dev/null 2>&1; then
+  echo "imported config should not be considered safe for template rebuild" >&2
+  exit 1
+fi
+
+custom_conf="$TMPDIR_ROOT/custom.conf"
+cat > "$custom_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=custom.example.com
+# listen_port=80
+server {
+    listen 80;
+    server_name custom.example.com;
+    location / { proxy_pass http://127.0.0.1:3000; }
+    location /api/ { proxy_pass http://127.0.0.1:4000; }
+}
+EOF
+if require_template_rebuild_safe "$custom_conf" "测试" >/dev/null 2>&1; then
+  echo "custom-location config should not be considered safe for template rebuild" >&2
+  exit 1
+fi
+
+multi_server_conf="$TMPDIR_ROOT/multi-server.conf"
+cat > "$multi_server_conf" <<'EOF'
+server { listen 80; server_name one.example.com; }
+server { listen 80; server_name two.example.com; }
+EOF
+if validate_importable_conf "$multi_server_conf" >/dev/null 2>&1; then
+  echo "multi-server config should be rejected by import validation" >&2
+  exit 1
+fi
+
+cert_ref_conf="$CONF_DIR/cert-ref.conf"
+cat > "$cert_ref_conf" <<EOF
+# managed_by=Nginx-X
+server {
+    listen 443 ssl;
+    server_name example.com;
+    ssl_certificate     ${SSL_DIR}/example.com/fullchain.pem;
+    ssl_certificate_key ${SSL_DIR}/example.com/privkey.pem;
+}
+EOF
+grep -q 'cert-ref.conf' < <(cert_referenced_confs example.com)
+rm -f "$cert_ref_conf"
+
 # Stream mode must not duplicate timeout directives in the same location.
 stream_conf="$TMPDIR_ROOT/stream-443.conf"
 build_external_proxy_conf \
