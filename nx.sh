@@ -575,6 +575,21 @@ conf_meta_get() {
   grep -E "^# ${key}=" "$conf_file" 2>/dev/null | head -n1 | sed "s/^# ${key}=//" || true
 }
 
+mark_conf_manual_edited() {
+  local conf_file="$1"
+  local tmp
+
+  grep -q '^# edited=true$' "$conf_file" 2>/dev/null && return 0
+
+  tmp="$(mktemp /tmp/nginxx-edited.XXXXXX.conf)"
+  {
+    echo "# edited=true"
+    cat "$conf_file"
+  } > "$tmp"
+  ${SUDO} cp -a "$tmp" "$conf_file"
+  rm -f "$tmp"
+}
+
 conf_server_block_count() {
   local conf_file="$1"
   grep -cE '^[[:space:]]*server[[:space:]]*\{' "$conf_file" 2>/dev/null || true
@@ -603,6 +618,7 @@ conf_safe_for_template_rebuild() {
   local servers
 
   [[ "$(conf_meta_get "$conf_file" imported)" == "true" ]] && return 1
+  [[ "$(conf_meta_get "$conf_file" edited)" == "true" ]] && return 1
 
   servers="$(conf_server_block_count "$conf_file")"
   [[ -z "$servers" ]] && servers=0
@@ -631,7 +647,7 @@ require_template_rebuild_safe() {
 
 cert_referenced_confs() {
   local domain="$1"
-  grep -R -l -E "^[[:space:]]*ssl_certificate(_key)?[[:space:]]+.*${SSL_DIR}/${domain}/" \
+  grep -R -l -F "${SSL_DIR}/${domain}/" \
     "${CONF_DIR}"/*.conf "${CONF_DIR}"/*.conf.* 2>/dev/null || true
 }
 
@@ -1907,6 +1923,8 @@ edit_conf_manual() {
     error "编辑器启动失败，已恢复原配置。"
     return 1
   fi
+
+  mark_conf_manual_edited "$target"
 
   if nginx_test; then
     reload_nginx_safe

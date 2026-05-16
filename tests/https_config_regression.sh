@@ -106,6 +106,24 @@ if require_template_rebuild_safe "$imported_conf" "测试" >/dev/null 2>&1; then
   exit 1
 fi
 
+edited_conf="$TMPDIR_ROOT/edited.conf"
+cat > "$edited_conf" <<'EOF'
+# managed_by=Nginx-X
+# domain=edited.example.com
+# listen_port=80
+server {
+    listen 80;
+    server_name edited.example.com;
+    location / { proxy_pass http://127.0.0.1:3000; }
+}
+EOF
+mark_conf_manual_edited "$edited_conf"
+grep -q '^# edited=true$' "$edited_conf"
+if require_template_rebuild_safe "$edited_conf" "测试" >/dev/null 2>&1; then
+  echo "manually edited config should not be considered safe for template rebuild" >&2
+  exit 1
+fi
+
 custom_conf="$TMPDIR_ROOT/custom.conf"
 cat > "$custom_conf" <<'EOF'
 # managed_by=Nginx-X
