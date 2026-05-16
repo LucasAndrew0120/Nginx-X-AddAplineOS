@@ -1387,11 +1387,13 @@ list_managed_conf_files() {
   if [[ "$include_disabled" == "1" ]]; then
     find "$CONF_DIR" -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conf.*' \) \
       ! -name 'nginx_status.conf' \
+      ! -name '00-websocket-map.conf' \
       ! -name 'acme-challenge-*.conf' \
       -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
   else
     find "$CONF_DIR" -maxdepth 1 -type f -name '*.conf' \
       ! -name 'nginx_status.conf' \
+      ! -name '00-websocket-map.conf' \
       ! -name 'acme-challenge-*.conf' \
       -exec grep -l '^# managed_by=Nginx-X$' {} + 2>/dev/null | sort || true
   fi
