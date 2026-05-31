@@ -1243,7 +1243,7 @@ add_reverse_proxy() {
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
-      info "已取消添加配置。"
+      info "已取消内部反代配置。"
       return 0
     fi
 
@@ -1378,7 +1378,7 @@ add_external_url_proxy() {
   if is_port_used_os "$listen_port"; then
     warn "监听端口 ${listen_port} 当前已被占用（Nginx 多站点场景通常可复用）。"
     if ! confirm "是否继续写入配置并交由 nginx -t 校验？"; then
-      info "已取消添加配置。"
+      info "已取消外部反代配置。"
       return 0
     fi
 
@@ -1490,7 +1490,7 @@ print_conf_list() {
   FILES=("${enabled_files[@]}" "${disabled_files[@]}")
 
   if [[ ${#FILES[@]} -eq 0 ]]; then
-    warn "当前没有可管理的配置文件。你可以先去 [添加配置] 或 [外部反代] 创建一个站点。"
+    warn "当前没有可管理的配置文件。你可以先去 [内部反代] 或 [外部反代] 创建一个站点。"
     return 1
   fi
 
@@ -2110,6 +2110,8 @@ import_single_conf() {
   local conf="$1"
   local meta domain listen_port backend_url https_enabled mode
   local target_name target_path tmp
+  local real_conf backup_conf="" target_written=""
+  local -a removed_links=()
 
   meta="$(_extract_conf_meta "$conf")"
   IFS='|' read -r domain listen_port backend_url https_enabled mode <<< "$meta"
@@ -2161,19 +2163,33 @@ import_single_conf() {
     cat "$conf"
   } > "$tmp"
 
-  local real_conf
   real_conf="$(realpath "$conf" 2>/dev/null || echo "$conf")"
 
   if [[ "$real_conf" == "${CONF_DIR}/"* ]]; then
     # 原文件就在 conf.d 里，直接原地加元数据头
+    backup_conf="$(mktemp /tmp/nginxx-import-backup.XXXXXX.conf)"
+    ${SUDO} cp -a "$real_conf" "$backup_conf"
     ${SUDO} cp -a "$tmp" "$real_conf"
+    target_written="$real_conf"
     # 如果文件名不符合 domain-port.conf 规范，重命名
     if [[ "$(basename "$real_conf")" != "$target_name" && ! -f "$target_path" ]]; then
       ${SUDO} mv "$real_conf" "$target_path"
+      target_written="$target_path"
     fi
+
+    if ! nginx_test; then
+      [[ -n "$target_written" && "$target_written" != "$real_conf" ]] && ${SUDO} rm -f "$target_written"
+      ${SUDO} cp -a "$backup_conf" "$real_conf"
+      rm -f "$tmp" "$backup_conf"
+      error "导入后配置校验失败，已回滚：${conf}"
+      ${SUDO} nginx -t || true
+      return 1
+    fi
+    rm -f "$backup_conf"
   else
     # 来自 sites-available / sites-enabled，复制到 conf.d
     ${SUDO} cp -a "$tmp" "$target_path"
+    target_written="$target_path"
 
     # 移除 sites-enabled 中对应的软链接（避免重复加载）
     local enabled_link
@@ -2183,9 +2199,23 @@ import_single_conf() {
       link_target="$(realpath "$enabled_link" 2>/dev/null || true)"
       if [[ "$link_target" == "$real_conf" ]]; then
         ${SUDO} rm -f "$enabled_link"
+        removed_links+=("$enabled_link")
         info "已移除 sites-enabled 软链接：$(basename "$enabled_link")"
       fi
     done
+
+    if ! nginx_test; then
+      ${SUDO} rm -f "$target_written"
+      local removed_link
+      for removed_link in "${removed_links[@]}"; do
+        ${SUDO} ln -s "$real_conf" "$removed_link" 2>/dev/null || true
+      done
+      rm -f "$tmp"
+      error "导入后配置校验失败，已回滚：${conf}"
+      ${SUDO} nginx -t || true
+      return 1
+    fi
+
     # 导入成功后询问是否删除原文件
     if confirm "是否删除原始配置文件 ${real_conf}？（推荐删除，避免重复扫描）"; then
       ${SUDO} rm -f "$real_conf"
@@ -2261,7 +2291,7 @@ config_entry_menu() {
   while true; do
     clear
     echo "========== 配置管理 =========="
-    echo "1) 添加配置"
+    echo "1) 内部反代"
     echo "2) 外部反代"
     echo "3) 配置列表"
     echo "4) 导入已有配置"
