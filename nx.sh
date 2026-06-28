@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================
 # Nginx-X: Nginx 自动化管理脚本
-# 支持：Ubuntu / Debian / CentOS
+# 支持：Ubuntu / Debian / CentOS / Alpine / OpenWrt
 # ==============================
 
 # ---------- ANSI 颜色 ----------
@@ -15,12 +15,18 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="1.7.0"
-CONF_DIR="/etc/nginx/conf.d"
+APP_VERSION="1.8.0"
+# Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
+if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
+  CONF_DIR="/etc/nginx/http.d"
+else
+  CONF_DIR="/etc/nginx/conf.d"
+fi
 SSL_DIR="/etc/nginx/ssl"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
 EMAIL_CONF="${STATE_DIR}/email.conf"
+DNS_CONF="${STATE_DIR}/dns.conf"
 
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -122,6 +128,14 @@ reload_nginx_safe() {
       ${SUDO} systemctl start nginx
       info "检测到 Nginx 未运行，已自动启动。"
     fi
+  elif check_cmd rc-service; then
+    if ${SUDO} rc-service nginx status 2>/dev/null; then
+      ${SUDO} rc-service nginx reload 2>/dev/null || ${SUDO} rc-service nginx restart
+      info "Nginx 已重载。"
+    else
+      ${SUDO} rc-service nginx start
+      info "检测到 Nginx 未运行，已自动启动。"
+    fi
   else
     if ${SUDO} service nginx status >/dev/null 2>&1; then
       ${SUDO} service nginx reload
@@ -141,6 +155,10 @@ ensure_dirs() {
 # 写入 WebSocket upgrade map，避免对普通 HTTP 请求发送固定 Connection: upgrade
 ensure_websocket_map() {
   local map_conf="${CONF_DIR}/00-websocket-map.conf"
+  # Skip if nginx.conf already defines the map (e.g. Alpine default config)
+  if grep -q 'map \$http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
+    return 0
+  fi
   if [[ ! -f "$map_conf" ]]; then
     ${SUDO} tee "$map_conf" > /dev/null <<'EOF'
 # managed_by=Nginx-X
@@ -185,6 +203,10 @@ detect_pkg_mgr() {
     echo "dnf"
   elif check_cmd yum; then
     echo "yum"
+  elif check_cmd apk; then
+    echo "apk"
+  elif check_cmd opkg; then
+    echo "opkg"
   else
     echo "unknown"
   fi
@@ -275,6 +297,22 @@ pkg_upgrade_error_hint() {
         echo "YUM/DNF 升级失败：请检查上方输出（网络/源/GPG）。"
       fi
       ;;
+    apk)
+      if echo "$out" | grep -qiE 'temporary error|network error|unreachable|resolve'; then
+        echo "APK 网络/DNS 异常：请检查 DNS、网络连通性或更换镜像源。"
+      elif echo "$out" | grep -qiE 'unsatisfiable constraints'; then
+        echo "APK 依赖冲突：可能包版本不兼容，请尝试 apk update 后重试。"
+      else
+        echo "APK 升级失败：请检查上方输出（网络/源/依赖）。"
+      fi
+      ;;
+    opkg)
+      if echo "$out" | grep -qiE 'wget returned|download failed|signature check failed'; then
+        echo "OPKG 下载或签名失败：请检查网络、软件源或系统时间。"
+      else
+        echo "OPKG 升级失败：请检查上方输出（网络/源）。"
+      fi
+      ;;
     *)
       echo "升级失败：请检查上方输出。"
       ;;
@@ -359,6 +397,28 @@ REPO
         return 1
       fi
       ;;
+    apk)
+      if ! ${SUDO} apk add curl wget socat dcron; then
+        error "依赖安装失败。请检查网络连接、APK 源状态或稍后重试。"
+        return 1
+      fi
+
+      note "配置 Nginx 官方源并安装..."
+      ${SUDO} apk add nginx nginx-mod-stream || {
+        error "Nginx 安装失败。请检查网络连接、APK 源状态或稍后重试。"
+        return 1
+      }
+      ;;
+    opkg)
+      if ! ${SUDO} opkg update; then
+        error "OPKG 索引刷新失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
+      if ! ${SUDO} opkg install curl wget socat cron nginx; then
+        error "依赖和 Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
+        return 1
+      fi
+      ;;
     *)
       error "不支持的包管理器，无法自动安装。"
       return 1
@@ -368,6 +428,11 @@ REPO
   if check_cmd systemctl; then
     ${SUDO} systemctl enable --now nginx || true
     ${SUDO} systemctl enable --now cron 2>/dev/null || ${SUDO} systemctl enable --now crond 2>/dev/null || true
+  elif check_cmd rc-service; then
+    ${SUDO} rc-update add nginx default 2>/dev/null || true
+    ${SUDO} rc-service nginx start 2>/dev/null || true
+    ${SUDO} rc-update add dcron default 2>/dev/null || ${SUDO} rc-update add crond default 2>/dev/null || true
+    ${SUDO} rc-service dcron start 2>/dev/null || ${SUDO} rc-service crond start 2>/dev/null || true
   fi
 
   # 安装后自动停用可能引发冲突的默认配置
@@ -436,6 +501,12 @@ upgrade_nginx_smart() {
     dnf|yum)
       note "将执行：${pkg} update -y nginx"
       ;;
+    apk)
+      note "将执行：apk upgrade nginx"
+      ;;
+    opkg)
+      note "将执行：opkg upgrade nginx"
+      ;;
   esac
   case "$pkg" in
     apt)
@@ -457,6 +528,32 @@ upgrade_nginx_smart() {
         error "${pkg} 升级失败。"
         warn "$(pkg_upgrade_error_hint "$pkg" "$pm_out")"
         echo "$pm_out"
+        return 1
+      }
+      ;;
+    apk)
+      local apk_out=""
+      if ! ${SUDO} apk update; then
+        error "APK 索引刷新失败。"
+        return 1
+      fi
+      apk_out="$(${SUDO} apk upgrade nginx 2>&1)" || {
+        error "APK 升级失败。"
+        warn "$(pkg_upgrade_error_hint apk "$apk_out")"
+        echo "$apk_out"
+        return 1
+      }
+      ;;
+    opkg)
+      local opkg_out=""
+      if ! ${SUDO} opkg update; then
+        error "OPKG 索引刷新失败。"
+        return 1
+      fi
+      opkg_out="$(${SUDO} opkg upgrade nginx 2>&1)" || {
+        error "OPKG 升级失败。"
+        warn "$(pkg_upgrade_error_hint opkg "$opkg_out")"
+        echo "$opkg_out"
         return 1
       }
       ;;
@@ -581,7 +678,7 @@ mark_conf_manual_edited() {
 
   grep -q '^# edited=true$' "$conf_file" 2>/dev/null && return 0
 
-  tmp="$(mktemp /tmp/nginxx-edited.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-edited-XXXXXX)"
   {
     echo "# edited=true"
     cat "$conf_file"
@@ -1271,7 +1368,7 @@ add_reverse_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-"${domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-"${domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
 
   build_proxy_conf "$domain" "$create_port" "$backend_port" "$tmp"
@@ -1403,7 +1500,7 @@ add_external_url_proxy() {
   fi
 
   target="$(conf_target_path "$domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-external-"${domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-external-"${domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
 
   build_external_proxy_conf "$domain" "$create_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
@@ -1625,7 +1722,7 @@ modify_conf() {
     fi
   fi
 
-  tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-mod-"${new_domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
   build_proxy_conf "$new_domain" "$new_listen" "$new_backend" "$tmp"
 
@@ -1817,7 +1914,7 @@ modify_external_conf() {
   fi
 
   new_target="$(conf_target_path "$new_domain" "$desired_port")"
-  tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-external-mod-"${new_domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
   build_external_proxy_conf "$new_domain" "$create_port" "$new_upstream_url" "$new_mode" "$tmp" "0" "$new_stream_upstream_url" "$new_source_site_url" "$new_referer_url" "$new_stream_upstream_urls"
 
@@ -2157,7 +2254,7 @@ import_single_conf() {
   meta_header+=$'\n'
 
   # 生成新配置（元数据头 + 原始内容）
-  tmp="$(mktemp /tmp/nginxx-import.XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-import-XXXXXX)"
   {
     echo "$meta_header"
     cat "$conf"
@@ -2167,7 +2264,7 @@ import_single_conf() {
 
   if [[ "$real_conf" == "${CONF_DIR}/"* ]]; then
     # 原文件就在 conf.d 里，直接原地加元数据头
-    backup_conf="$(mktemp /tmp/nginxx-import-backup.XXXXXX.conf)"
+    backup_conf="$(mktemp /tmp/nginxx-import-backup-XXXXXX)"
     ${SUDO} cp -a "$real_conf" "$backup_conf"
     ${SUDO} cp -a "$tmp" "$real_conf"
     target_written="$real_conf"
@@ -2311,6 +2408,281 @@ config_entry_menu() {
 }
 
 # ---------- 功能5：证书管理（acme.sh） ----------
+
+# --- DNS-01 配置 ---
+load_dns_conf() {
+  ensure_state_dir
+  if [[ -f "$DNS_CONF" ]]; then
+    # shellcheck disable=SC1090
+    . "$DNS_CONF"
+  fi
+}
+
+save_dns_conf() {
+  local provider="$1"
+  local key1="$2"
+  local key2="$3"
+  ensure_state_dir
+  cat > "$DNS_CONF" <<EOF
+DNS_PROVIDER="${provider}"
+DNS_KEY1="${key1}"
+DNS_KEY2="${key2}"
+EOF
+  info "DNS API 配置已保存到：${DNS_CONF}"
+}
+
+has_dns_config() {
+  load_dns_conf
+  [[ -n "${DNS_PROVIDER:-}" && -n "${DNS_KEY1:-}" ]]
+}
+
+get_dns_issue_args() {
+  load_dns_conf
+  case "${DNS_PROVIDER:-}" in
+    cf|cloudflare)
+      echo "--dns dns_cf"
+      ;;
+    dp|dnspod)
+      echo "--dns dns_dp"
+      ;;
+    ali|alidns)
+      echo "--dns dns_ali"
+      ;;
+    he|he.net)
+      echo "--dns dns_he"
+      ;;
+    gd|godaddy)
+      echo "--dns dns_gd"
+      ;;
+    hw|huaweicloud)
+      echo "--dns dns_huaweicloud"
+      ;;
+    aws|route53)
+      echo "--dns dns_aws"
+      ;;
+    google|gcp)
+      echo "--dns dns_gcloud"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+setup_dns_api() {
+  local choice provider key1 key2
+  echo "选择 DNS 服务商："
+  echo "1)  Cloudflare      (CF_Token)"
+  echo "2)  DNSPod          (DP_Id + DP_Key)"
+  echo "3)  阿里云 DNS      (Ali_Key + Ali_Secret)"
+  echo "4)  HE.net          (HE_Username + HE_Password)"
+  echo "5)  GoDaddy         (GD_Key + GD_Secret)"
+  echo "6)  华为云          (HUAWEICLOUD_Username + HUAWEICLOUD_Password)"
+  echo "7)  AWS Route53     (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)"
+  echo "8)  Google Cloud    (GCE_Project + GCE_ServiceAccountEmail)"
+  read -rp "请选择 [1-8]: " choice
+
+  case "$choice" in
+    1) provider="cf"; read -rp "Cloudflare API Token: " key1 ;;
+    2) provider="dp"; read -rp "DNSPod ID: " key1; read -rp "DNSPod Key: " key2 ;;
+    3) provider="ali"; read -rp "Aliyun AccessKey ID: " key1; read -rp "Aliyun AccessKey Secret: " key2 ;;
+    4) provider="he"; read -rp "HE.net Username: " key1; read -rp "HE.net Password: " key2 ;;
+    5) provider="gd"; read -rp "GoDaddy API Key: " key1; read -rp "GoDaddy API Secret: " key2 ;;
+    6) provider="hw"; read -rp "华为云 Username: " key1; read -rp "华为云 Password: " key2 ;;
+    7) provider="aws"; read -rp "AWS Access Key ID: " key1; read -rp "AWS Secret Access Key: " key2 ;;
+    8) provider="google"; read -rp "GCE Project: " key1; read -rp "Service Account Email: " key2 ;;
+    *) error "无效选择。"; return 1 ;;
+  esac
+  [[ -z "$key1" ]] && { error "API Key 不能为空。"; return 1; }
+
+  save_dns_conf "$provider" "$key1" "${key2:-}"
+
+  # Export env vars for acme.sh
+  case "$provider" in
+    cf) export CF_Token="$key1" ;;
+    dp) export DP_Id="$key1"; export DP_Key="$key2" ;;
+    ali) export Ali_Key="$key1"; export Ali_Secret="$key2" ;;
+    he) export HE_Username="$key1"; export HE_Password="$key2" ;;
+    gd) export GD_Key="$key1"; export GD_Secret="$key2" ;;
+    hw) export HUAWEICLOUD_Username="$key1"; export HUAWEICLOUD_Password="$key2" ;;
+    aws) export AWS_ACCESS_KEY_ID="$key1"; export AWS_SECRET_ACCESS_KEY="$key2" ;;
+    google) export GCE_Project="$key1"; export GCE_ServiceAccountEmail="$key2" ;;
+  esac
+
+  info "DNS API 配置完成（${provider}）。"
+  if confirm "是否现在测试申请证书？"; then
+    local test_domain
+    read -rp "请输入测试域名: " test_domain
+    if valid_domain "$test_domain"; then
+      _issue_cert_dns "$test_domain"
+    fi
+  fi
+}
+
+export_dns_env() {
+  load_dns_conf
+  case "${DNS_PROVIDER:-}" in
+    cf) export CF_Token="${DNS_KEY1}" ;;
+    dp) export DP_Id="${DNS_KEY1}"; export DP_Key="${DNS_KEY2}" ;;
+    ali) export Ali_Key="${DNS_KEY1}"; export Ali_Secret="${DNS_KEY2}" ;;
+    he) export HE_Username="${DNS_KEY1}"; export HE_Password="${DNS_KEY2}" ;;
+    gd) export GD_Key="${DNS_KEY1}"; export GD_Secret="${DNS_KEY2}" ;;
+    hw) export HUAWEICLOUD_Username="${DNS_KEY1}"; export HUAWEICLOUD_Password="${DNS_KEY2}" ;;
+    aws) export AWS_ACCESS_KEY_ID="${DNS_KEY1}"; export AWS_SECRET_ACCESS_KEY="${DNS_KEY2}" ;;
+    google) export GCE_Project="${DNS_KEY1}"; export GCE_ServiceAccountEmail="${DNS_KEY2}" ;;
+  esac
+}
+
+detect_cert_mode() {
+  # 返回 http 或 dns（自动检测最适合的验证方式）
+  # NAT 机没有 80 端口时自动返回 dns
+  if ss -lnt 2>/dev/null | awk 'NR>1{print $4}' | grep -qE '(^|:)80$'; then
+    echo "http"
+  elif has_dns_config; then
+    echo "dns"
+  else
+    echo "http"
+  fi
+}
+
+_issue_cert_dns() {
+  local domain="$1"
+  local dns_args issue_output retry_after
+
+  load_email
+  if [[ -z "${ACME_EMAIL:-}" ]]; then
+    error "未设置邮箱，无法申请证书。"
+    return 1
+  fi
+
+  if ! has_dns_config; then
+    error "未配置 DNS API。请先在证书管理里执行 [3) 配置 DNS API]。"
+    return 1
+  fi
+
+  dns_args="$(get_dns_issue_args)"
+  if [[ -z "$dns_args" ]]; then
+    error "不支持的 DNS 服务商配置，请重新设置。"
+    return 1
+  fi
+
+  ensure_acme_installed || return 1
+
+  note "开始为 ${domain} 申请证书（DNS-01 验证）..."
+  export_dns_env
+  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
+
+  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" $dns_args 2>&1)" || {
+    echo "$issue_output"
+    if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
+      retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
+      error "证书申请失败：触发 Let's Encrypt 频率限制（429）。"
+      [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
+    elif echo "$issue_output" | grep -qi 'verify error\|dns.*fail\|NXDOMAIN\|SERVFAIL'; then
+      error "DNS 验证失败。请确认：1) DNS API 密钥正确 2) 域名 DNS 托管在所选服务商 3) 域名已正确解析。"
+    else
+      error "证书申请失败。请检查 DNS API 配置和网络连接。"
+    fi
+    return 1
+  }
+
+  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
+  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
+    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
+
+  ensure_acme_cron
+  info "证书申请并安装成功（DNS-01）。"
+}
+
+_issue_cert_http() {
+  # 原有的 HTTP-01 逻辑
+  local domain="$1"
+  local challenge_conf
+
+  ensure_acme_location_for_domain_conf "$domain"
+  challenge_conf="$(ensure_http_challenge_server "$domain")"
+
+  if ! reload_nginx_safe; then
+    cleanup_http_challenge_server "$challenge_conf"
+    error "证书申请前校验失败：Nginx 配置未生效。"
+    return 1
+  fi
+
+  local pre_rc=0
+  if precheck_http01 "$domain"; then
+    pre_rc=0
+  else
+    pre_rc=$?
+  fi
+  if (( pre_rc != 0 )); then
+    if [[ $pre_rc -eq 10 ]]; then
+      if ! confirm "自检存在风险，是否仍继续申请证书？"; then
+        cleanup_http_challenge_server "$challenge_conf"
+        reload_nginx_safe || true
+        info "已取消申请。"
+        return 1
+      fi
+      warn "你选择继续申请，将直接尝试签发。"
+    else
+      if has_dns_config; then
+        warn "HTTP-01 自检失败，是否改用 DNS-01 方式申请？"
+        if confirm "使用 DNS-01 方式？"; then
+          cleanup_http_challenge_server "$challenge_conf"
+          reload_nginx_safe || true
+          _issue_cert_dns "$domain"
+          return $?
+        fi
+      fi
+      if ! confirm "自检失败（建议先修复），是否仍强制继续申请？"; then
+        cleanup_http_challenge_server "$challenge_conf"
+        reload_nginx_safe || true
+        info "已取消申请。"
+        return 1
+      fi
+      warn "你选择强制继续申请。"
+    fi
+  fi
+
+  ensure_acme_installed || return 1
+
+  note "开始为 ${domain} 申请证书（HTTP 验证）..."
+  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
+
+  local issue_output retry_after
+  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
+    echo "$issue_output"
+    cleanup_http_challenge_server "$challenge_conf"
+    reload_nginx_safe || true
+
+    if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
+      retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
+      error "证书申请失败：触发 Let's Encrypt 频率限制（429）。"
+      [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
+      warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
+    else
+      error "证书申请失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
+      if has_dns_config; then
+        warn "你已配置 DNS API，可前往主菜单选择 [3) 配置 DNS API] 后使用 DNS 方式申请。"
+      fi
+    fi
+    return 1
+  }
+
+  cleanup_http_challenge_server "$challenge_conf"
+  reload_nginx_safe || true
+
+  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
+  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
+    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
+
+  ensure_acme_cron
+  info "证书申请并安装成功。"
+}
+
 load_email() {
   ensure_state_dir
   if [[ -f "$EMAIL_CONF" ]]; then
@@ -2337,7 +2709,7 @@ ensure_acme_installed() {
 
   note "未检测到 acme.sh，开始安装..."
 
-  install_script="$(mktemp /tmp/acme-install.XXXXXX.sh)"
+  install_script="$(mktemp /tmp/acme-install-XXXXXX)"
   if ! curl -fsSL https://get.acme.sh -o "$install_script"; then
     cleanup_tmp_file "$install_script"
     error "acme.sh 安装脚本下载失败，请稍后重试。"
@@ -2364,10 +2736,33 @@ ensure_acme_cron() {
   cron_line="0 3 1 */2 * $HOME/.acme.sh/acme.sh --cron --home $HOME/.acme.sh >/dev/null"
 
   if crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then
-    info "已检测到 acme.sh 自动续期任务。"
+    info "已检测到 acme.sh 自动续期任务（crontab）。"
     return 0
   fi
 
+  # Alpine dcron: try periodic script as fallback
+  if check_cmd dcron || [[ -d /etc/periodic ]]; then
+    local periodic_script="/etc/periodic/monthly/acme-renew"
+    if [[ -f "$periodic_script" ]]; then
+      info "已检测到 acme.sh 自动续期任务（dcron periodic）。"
+      return 0
+    fi
+    warn "未检测到 acme.sh 自动续期任务。"
+    if confirm "是否一键添加自动续期任务（每月执行）？"; then
+      ${SUDO} mkdir -p /etc/periodic/monthly
+      ${SUDO} tee "$periodic_script" >/dev/null <<EOF
+#!/bin/sh
+$HOME/.acme.sh/acme.sh --cron --home $HOME/.acme.sh >/dev/null
+EOF
+      ${SUDO} chmod +x "$periodic_script"
+      info "已添加 acme.sh 自动续期任务（/etc/periodic/monthly/acme-renew）。"
+    else
+      warn "你选择了不添加自动续期任务，后续需手动续期。"
+    fi
+    return 0
+  fi
+
+  # Standard crontab
   warn "未检测到 acme.sh 自动续期任务。"
   if confirm "是否一键添加自动续期任务（约每60天执行）？"; then
     (crontab -l 2>/dev/null; echo "$cron_line") | crontab -
@@ -2378,13 +2773,21 @@ ensure_acme_cron() {
 }
 
 has_acme_cron_task() {
-  crontab -l 2>/dev/null | grep -q 'acme.sh --cron'
+  crontab -l 2>/dev/null | grep -q 'acme.sh --cron' || \
+    [[ -f /etc/periodic/monthly/acme-renew ]]
 }
 
 disable_acme_cron() {
-  if has_acme_cron_task; then
+  if crontab -l 2>/dev/null | grep -q 'acme.sh --cron'; then
     crontab -l 2>/dev/null | grep -v 'acme.sh --cron' | crontab - || true
-    info "已关闭自动续期任务。"
+    info "已关闭 crontab 自动续期任务。"
+  fi
+  if [[ -f /etc/periodic/monthly/acme-renew ]]; then
+    ${SUDO} rm -f /etc/periodic/monthly/acme-renew
+    info "已关闭 dcron periodic 自动续期任务。"
+  fi
+  if ! has_acme_cron_task; then
+    :
   else
     warn "当前未检测到自动续期任务。"
   fi
@@ -2464,7 +2867,7 @@ ensure_acme_location_for_domain_conf() {
       continue
     fi
 
-    tmp_file="$(mktemp /tmp/nginxx-acme-loc-"${domain}".XXXXXX.conf)"
+    tmp_file="$(mktemp /tmp/nginxx-acme-loc-"${domain}"-XXXXXX)"
     tmp_files+=("$tmp_file")
     awk '
       BEGIN{inserted=0}
@@ -2509,7 +2912,7 @@ ensure_http_challenge_server() {
   fi
 
   local tmp_challenge
-  tmp_challenge="$(mktemp /tmp/.acme-challenge-"${domain}".XXXXXX.conf)"
+  tmp_challenge="$(mktemp /tmp/.acme-challenge-"${domain}"-XXXXXX)"
   trap 'rm -f "${tmp_challenge:-}"' RETURN
 
   cat > "$tmp_challenge" <<EOF
@@ -2594,7 +2997,7 @@ precheck_http01() {
 }
 
 issue_cert() {
-  local domain
+  local domain cert_mode
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
@@ -2608,11 +3011,25 @@ issue_cert() {
     return 1
   fi
 
-  _issue_cert_impl "$domain"
+  cert_mode="$(detect_cert_mode)"
+  if [[ "$cert_mode" == "dns" ]]; then
+    info "检测到本机未监听 80 端口，将使用 DNS-01 方式申请。"
+  elif has_dns_config; then
+    echo "选择验证方式："
+    echo "1) HTTP-01（需要 80 端口）"
+    echo "2) DNS-01（已配置：${DNS_PROVIDER:-unknown}）"
+    read -rp "请选择 [1-2] (默认 1): " mode_choice
+    [[ "$mode_choice" == "2" ]] && cert_mode="dns"
+  fi
+
+  if [[ "$cert_mode" == "dns" ]]; then
+    _issue_cert_dns "$domain"
+  else
+    _issue_cert_http "$domain"
+  fi
 }
 
 issue_cert_for_domain() {
-  # 参数：域名；用于"添加反向代理后自动申请证书"场景
   local domain="$1"
   load_email
 
@@ -2621,83 +3038,14 @@ issue_cert_for_domain() {
     return 1
   fi
 
-  _issue_cert_impl "$domain"
-}
-
-_issue_cert_impl() {
-  # 内部共享实现：签发证书（被 issue_cert 和 issue_cert_for_domain 调用）
-  local domain="$1"
-  local challenge_conf
-
-  ensure_acme_location_for_domain_conf "$domain"
-  challenge_conf="$(ensure_http_challenge_server "$domain")"
-
-  # 确保挑战配置已生效
-  if ! reload_nginx_safe; then
-    cleanup_http_challenge_server "$challenge_conf"
-    error "证书申请前校验失败：Nginx 配置未生效。"
-    return 1
-  fi
-
-  local pre_rc=0
-  if precheck_http01 "$domain"; then
-    pre_rc=0
+  local cert_mode
+  cert_mode="$(detect_cert_mode)"
+  if [[ "$cert_mode" == "dns" ]]; then
+    info "自动使用 DNS-01 方式为 ${domain} 申请证书..."
+    _issue_cert_dns "$domain"
   else
-    pre_rc=$?
+    _issue_cert_http "$domain"
   fi
-  if (( pre_rc != 0 )); then
-    if [[ $pre_rc -eq 10 ]]; then
-      if ! confirm "自检存在风险，是否仍继续申请证书？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择继续申请，将直接尝试签发。"
-    else
-      if ! confirm "自检失败（建议先修复），是否仍强制继续申请？"; then
-        cleanup_http_challenge_server "$challenge_conf"
-        reload_nginx_safe || true
-        info "已取消申请。"
-        return 1
-      fi
-      warn "你选择强制继续申请。"
-    fi
-  fi
-
-  ensure_acme_installed || return 1
-
-  note "开始为 ${domain} 申请证书（HTTP 验证）..."
-  "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-  "$HOME/.acme.sh/acme.sh" --register-account -m "$ACME_EMAIL" >/dev/null 2>&1 || true
-
-  local issue_output retry_after
-  issue_output="$("$HOME/.acme.sh/acme.sh" --issue -d "$domain" --webroot /usr/share/nginx/html 2>&1)" || {
-    echo "$issue_output"
-    cleanup_http_challenge_server "$challenge_conf"
-    reload_nginx_safe || true
-
-    if echo "$issue_output" | grep -qi 'rateLimited\|too many certificates'; then
-      retry_after="$(echo "$issue_output" | sed -n 's/.*retry after \([^:]*UTC\).*/\1/p' | head -n1)"
-      error "证书申请失败：触发 Let's Encrypt 频率限制（429）。"
-      [[ -n "$retry_after" ]] && warn "可重试时间（UTC）：$retry_after"
-      warn "这是 CA 侧限制，不是你服务器或端口配置问题。"
-    else
-      error "证书申请失败。请确认域名已解析到本机、80 端口已放行，且没有被 CDN/防火墙拦截。"
-    fi
-    return 1
-  }
-
-  cleanup_http_challenge_server "$challenge_conf"
-  reload_nginx_safe || true
-
-  ${SUDO} mkdir -p "${SSL_DIR}/${domain}"
-  "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-    --key-file "${SSL_DIR}/${domain}/privkey.pem" \
-    --fullchain-file "${SSL_DIR}/${domain}/fullchain.pem"
-
-  ensure_acme_cron
-  info "证书申请并安装成功。"
 }
 
 cert_list_action_menu() {
@@ -2760,7 +3108,7 @@ cert_list_action_menu() {
         fi
 
         local ssl_backup="" acme_backup="" acme_ecc_backup=""
-        ssl_backup="$(mktemp -d /tmp/nginxx-cert-"${domain}".XXXXXX)"
+        ssl_backup="$(mktemp -d /tmp/nginxx-cert-"${domain}"-XXXXXX)"
         if [[ -d "${SSL_DIR}/${domain}" ]]; then
           ${SUDO} cp -a "${SSL_DIR}/${domain}" "${ssl_backup}/ssl" 2>/dev/null || true
         fi
@@ -3130,7 +3478,7 @@ disable_https_for_conf_file() {
     referer_url="$(conf_meta_get "$conf_file" referer_url)"
     [[ -z "$external_mode" ]] && external_mode="normal"
 
-    tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+    tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}"-XXXXXX)"
     trap 'rm -f "${tmp:-}"' RETURN
     build_external_proxy_conf "$domain" "$listen_port" "$upstream_url" "$external_mode" "$tmp" "0" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
@@ -3177,7 +3525,7 @@ BLOCK
     fi
   fi
 
-  tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-disable-https-"${domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
   cat > "$tmp" <<EOF
 # managed_by=Nginx-X
@@ -3372,7 +3720,7 @@ enable_https_for_conf_file() {
     referer_url="$(conf_meta_get "$conf_file" referer_url)"
     [[ -z "$external_mode" ]] && external_mode="normal"
 
-    tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+    tmp="$(mktemp /tmp/nginxx-https-"${domain}"-XXXXXX)"
     trap 'rm -f "${tmp:-}"' RETURN
     build_external_proxy_conf "$domain" "$effective_https_port" "$upstream_url" "$external_mode" "$tmp" "1" "$stream_upstream_url" "$source_site_url" "$referer_url" "$stream_upstream_urls"
     if apply_conf_with_rollback "$tmp" "$conf_file"; then
@@ -3405,7 +3753,7 @@ BLOCK
 )
   fi
 
-  tmp="$(mktemp /tmp/nginxx-https-"${domain}".XXXXXX.conf)"
+  tmp="$(mktemp /tmp/nginxx-https-"${domain}"-XXXXXX)"
   trap 'rm -f "${tmp:-}"' RETURN
 
   # 复用原配置上游：优先读取注释元数据，避免同端口多域名场景误取到错误上游
@@ -3519,9 +3867,11 @@ cert_menu() {
     clear
     echo "========== 证书管理（acme.sh） =========="
     echo "1) 设置邮箱"
-    echo "2) 申请证书"
-    echo "3) 证书列表"
-    echo "4) 启用证书（HTTPS 强制跳转）"
+    echo "2) 申请证书（HTTP-01）"
+    echo "3) 配置 DNS API"
+    echo "4) 申请证书（DNS-01）"
+    echo "5) 证书列表"
+    echo "6) 启用证书（HTTPS 强制跳转）"
     echo "0) 返回上一级"
     echo "========================================"
     read -rp "请选择: " c
@@ -3529,10 +3879,12 @@ cert_menu() {
     case "$c" in
       1) run_menu_action set_acme_email; pause ;;
       2) run_menu_action issue_cert; pause ;;
-      3) cert_list_menu ;;
-      4) run_menu_action enable_https_for_domain; pause ;;
+      3) run_menu_action setup_dns_api; pause ;;
+      4) local dns_domain; load_email; if [[ -z "${ACME_EMAIL:-}" ]]; then error "请先设置邮箱。"; pause; else read -rp "请输入域名: " dns_domain; if valid_domain "$dns_domain"; then _issue_cert_dns "$dns_domain"; fi; pause; fi ;;
+      5) cert_list_menu ;;
+      6) run_menu_action enable_https_for_domain; pause ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-6 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -3545,7 +3897,7 @@ ensure_status_endpoint() {
   fi
 
   local tmp_status
-  tmp_status="$(mktemp /tmp/nginxx-status.XXXXXX.conf)"
+  tmp_status="$(mktemp /tmp/nginxx-status-XXXXXX)"
   trap 'rm -f "${tmp_status:-}"' RETURN
 
   cat > "$tmp_status" <<'EOF'
@@ -3835,6 +4187,9 @@ uninstall_nginx_only() {
   if check_cmd systemctl; then
     ${SUDO} systemctl stop nginx 2>/dev/null || true
     ${SUDO} systemctl disable nginx 2>/dev/null || true
+  elif check_cmd rc-service; then
+    ${SUDO} rc-service nginx stop 2>/dev/null || true
+    ${SUDO} rc-update del nginx 2>/dev/null || true
   fi
 
   case "$pkg" in
@@ -3846,6 +4201,12 @@ uninstall_nginx_only() {
     dnf|yum)
       ${SUDO} "$pkg" remove -y 'nginx*' || true
       ${SUDO} rm -f /etc/yum.repos.d/nginx.repo || true
+      ;;
+    apk)
+      ${SUDO} apk del nginx nginx-mod-stream 2>/dev/null || true
+      ;;
+    opkg)
+      ${SUDO} opkg remove nginx 2>/dev/null || true
       ;;
     *)
       warn "未知包管理器，尝试仅清理目录。"
@@ -3890,9 +4251,11 @@ uninstall_acme_only() {
     grep -v 'acme.sh --cron' /tmp/.nginxx_cron | crontab - || true
     rm -f /tmp/.nginxx_cron
   fi
+  ${SUDO} rm -f /etc/periodic/monthly/acme-renew 2>/dev/null || true
 
-  # 3) 清理邮箱持久化信息
+  # 3) 清理邮箱及 DNS API 持久化信息
   rm -f "$EMAIL_CONF" 2>/dev/null || true
+  rm -f "$DNS_CONF" 2>/dev/null || true
 
   info "Acme 及相关配置已清理完成。"
 }
