@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/LucasAndrew0120/Nginx-X-AddAplineOS.git"
+REPO_BRANCH="alpine-support"
 INSTALL_DIR="/opt/Nginx-X"
 TARGET_BIN="/usr/local/bin/nx"
 NO_RUN="0"
@@ -93,7 +94,7 @@ bootstrap_install() {
 
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "[INFO] 检测到已安装目录，正在更新..."
-    if ! ${SUDO} git -C "$INSTALL_DIR" pull --ff-only; then
+    if ! ${SUDO} git -C "$INSTALL_DIR" pull origin "$REPO_BRANCH" --ff-only; then
       echo "[ERROR] 拉取最新代码失败。"
       exit 1
     fi
@@ -110,13 +111,13 @@ bootstrap_install() {
     fi
     ${SUDO} rm -rf "$INSTALL_DIR"
     echo "[INFO] 已清理旧目录，重新克隆..."
-    if ! ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"; then
+    if ! ${SUDO} git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"; then
       echo "[ERROR] 克隆仓库失败。"
       exit 1
     fi
   else
     echo "[INFO] 克隆仓库到 $INSTALL_DIR"
-    if ! ${SUDO} git clone "$REPO_URL" "$INSTALL_DIR"; then
+    if ! ${SUDO} git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"; then
       echo "[ERROR] 克隆仓库失败。"
       exit 1
     fi
