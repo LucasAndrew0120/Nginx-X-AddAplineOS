@@ -156,7 +156,7 @@ ensure_dirs() {
 ensure_websocket_map() {
   local map_conf="${CONF_DIR}/00-websocket-map.conf"
   # Skip if nginx.conf already defines the map (e.g. Alpine default config)
-  if grep -q 'map \$http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
+  if grep -qF 'map $http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
     return 0
   fi
   if [[ ! -f "$map_conf" ]]; then
