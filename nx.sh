@@ -398,12 +398,12 @@ REPO
       fi
       ;;
     apk)
-      if ! ${SUDO} apk add curl wget socat dcron; then
+      if ! ${SUDO} apk add curl wget socat dcron openssl; then
         error "依赖安装失败。请检查网络连接、APK 源状态或稍后重试。"
         return 1
       fi
 
-      note "配置 Nginx 官方源并安装..."
+      note "安装 Nginx..."
       ${SUDO} apk add nginx nginx-mod-stream || {
         error "Nginx 安装失败。请检查网络连接、APK 源状态或稍后重试。"
         return 1
@@ -414,7 +414,7 @@ REPO
         error "OPKG 索引刷新失败。请检查网络连接、软件源状态或稍后重试。"
         return 1
       fi
-      if ! ${SUDO} opkg install curl wget socat cron nginx; then
+      if ! ${SUDO} opkg install curl wget socat cron nginx openssl-util; then
         error "依赖和 Nginx 安装失败。请检查网络连接、软件源状态或稍后重试。"
         return 1
       fi
@@ -438,6 +438,10 @@ REPO
   # 安装后自动停用可能引发冲突的默认配置
   disable_default_conf_if_exists
   reload_nginx_safe || true
+
+  # 自动安装 acme.sh
+  note "安装 acme.sh 证书工具..."
+  ensure_acme_installed || warn "acme.sh 安装失败，可稍后在证书管理中手动安装。"
 
   info "Nginx 与依赖安装完成。"
   info "已创建证书目录：${SSL_DIR}"
