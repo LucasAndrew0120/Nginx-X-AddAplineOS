@@ -2686,25 +2686,25 @@ detect_cert_mode() {
 select_cert_mode_interactive() {
   # 交互式选择证书验证方式，返回 "http" 或 "dns"
   local choice=""
-  echo "选择证书验证方式："
-  echo "1) HTTP-01（需要 80 端口公网可达）"
-  echo "2) DNS-01（需配置 DNS API Token，适用于 NAT/无80端口）"
+  echo "Select cert verification method:"
+  echo "1) HTTP-01  (requires port 80 reachable)"
+  echo "2) DNS-01   (requires DNS API Token, for NAT/no-port80)"
 
   local default_choice="1"
   if ! ss -lnt 2>/dev/null | awk 'NR>1{print $4}' | grep -qE '(^|:)80$'; then
-    warn "检测到本机未监听 80 端口，建议使用 DNS-01。"
+    warn "Port 80 not detected, DNS-01 suggested."
     default_choice="2"
   fi
 
-  read -rp "请选择 [1-2] (默认 ${default_choice}): " choice
+  read -rp "Choose [1-2] (default ${default_choice}): " choice
   [[ -z "$choice" ]] && choice="$default_choice"
 
   case "$choice" in
     2)
       if ! has_dns_config; then
-        warn "尚未配置 DNS API Token，请先设置。"
+        warn "DNS API Token not configured, please set up first."
         if ! setup_dns_api; then
-          error "DNS API 配置失败，将回退为 HTTP-01。"
+          error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
         fi
