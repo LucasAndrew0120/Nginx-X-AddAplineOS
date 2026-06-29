@@ -487,6 +487,13 @@ REPO
 
   # 安装后自动停用可能引发冲突的默认配置
   disable_default_conf_if_exists
+
+  # 安装后重新检测 conf 目录（Alpine 装完才有 http.d）
+  if [[ -d /etc/nginx/http.d ]]; then
+    CONF_DIR="/etc/nginx/http.d"
+    ensure_dirs
+  fi
+
   reload_nginx_safe || true
 
   # 自动安装 acme.sh
