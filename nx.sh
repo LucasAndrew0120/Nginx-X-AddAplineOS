@@ -155,6 +155,12 @@ ensure_dirs() {
 # 写入 WebSocket upgrade map，避免对普通 HTTP 请求发送固定 Connection: upgrade
 ensure_websocket_map() {
   local map_conf="${CONF_DIR}/00-websocket-map.conf"
+
+  # Skip if nginx is not installed yet (no nginx.conf)
+  if [[ ! -f /etc/nginx/nginx.conf ]]; then
+    return 0
+  fi
+
   # Skip if nginx.conf already defines the map (e.g. Alpine default config)
   if grep -qF 'map $http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
     return 0
