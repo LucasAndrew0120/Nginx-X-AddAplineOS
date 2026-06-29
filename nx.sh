@@ -159,6 +159,50 @@ ensure_websocket_map() {
   if grep -qF 'map $http_upgrade' /etc/nginx/nginx.conf 2>/dev/null; then
     return 0
   fi
+
+  # Detect if CONF_DIR is included inside the http block or at root level.
+  # The "map" directive is only valid in http context.
+  # If conf.d is included at root level (before http{}), we must inject
+  # the map into nginx.conf directly or use http.d instead.
+  local need_inject=0
+  if ! awk '
+    BEGIN { in_http = 0 }
+    /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
+    in_http && /include/ && /(conf\.d|http\.d)/ { found = 1; exit }
+    in_http && /^\}/ { in_http = 0 }
+    END { exit found ? 0 : 1 }
+  ' /etc/nginx/nginx.conf 2>/dev/null; then
+    need_inject=1
+  fi
+
+  if [[ "$need_inject" -eq 1 ]]; then
+    # CONF_DIR is included at root level → inject map into nginx.conf http block
+    local tmp_nginx
+    tmp_nginx="$(mktemp /tmp/nginxx-map-XXXXXX)"
+    trap 'rm -f "${tmp_nginx:-}"' RETURN
+    awk '
+      /^[[:space:]]*http[[:space:]]*\{/ {
+        print $0
+        print ""
+        print "    # managed_by=Nginx-X"
+        print "    map $http_upgrade $connection_upgrade {"
+        print "        default upgrade;"
+        print "        \"\"      close;"
+        print "    }"
+        print ""
+        next
+      }
+      { print }
+    ' /etc/nginx/nginx.conf > "$tmp_nginx"
+
+    ${SUDO} cp -a /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak."$(date +%s)" 2>/dev/null || true
+    ${SUDO} cp -a "$tmp_nginx" /etc/nginx/nginx.conf
+    rm -f "$tmp_nginx"
+    info "已将 WebSocket map 注入 nginx.conf http 块。"
+    return 0
+  fi
+
+  # Standard: CONF_DIR is inside http block, map file is safe
   if [[ ! -f "$map_conf" ]]; then
     ${SUDO} tee "$map_conf" > /dev/null <<'EOF'
 # managed_by=Nginx-X
@@ -890,6 +934,7 @@ select_external_mode() {
 
 ensure_cert_for_domain_interactive() {
   local domain="$1"
+  local cert_mode="${2:-}"
 
   if valid_ipv4_host "$domain"; then
     warn "当前使用的是 IP，证书自动申请通常不适用。"
@@ -906,7 +951,11 @@ ensure_cert_for_domain_interactive() {
     return 1
   fi
 
-  if ! issue_cert_for_domain "$domain"; then
+  if [[ -z "$cert_mode" ]]; then
+    cert_mode="$(select_cert_mode_interactive)"
+  fi
+
+  if ! issue_cert_for_domain "$domain" "$cert_mode"; then
     error "证书申请失败。"
     return 1
   fi
@@ -1404,19 +1453,21 @@ add_reverse_proxy() {
         fi
       fi
     else
-      if confirm "是否立即自动申请证书并启用 HTTPS（80 强制跳转 443）？"; then
+      if confirm "是否立即自动申请证书并启用 HTTPS？"; then
         # 在当前界面直接设置/保存邮箱（若未设置）
         if ! ensure_email_interactive; then
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
-          if issue_cert_for_domain "$domain"; then
+          local selected_cert_mode
+          selected_cert_mode="$(select_cert_mode_interactive)"
+          if issue_cert_for_domain "$domain" "$selected_cert_mode"; then
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
-              info "已完成：反向代理 + 自动证书 + 自动 HTTPS。"
+              info "已完成：反向代理 + 证书 + HTTPS 启用。"
             else
               warn "证书已申请成功，但启用 HTTPS 失败。请重点检查监听端口占用和 nginx -t 输出。"
             fi
           else
-            warn "自动证书申请失败，当前仅保留 HTTP 反向代理配置。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
+            warn "证书申请失败。请检查域名解析、端口放行或 DNS API 配置。"
           fi
         fi
       fi
@@ -1536,18 +1587,20 @@ add_external_url_proxy() {
         fi
       fi
     else
-      if confirm "是否立即自动申请证书并启用 HTTPS（80 强制跳转 443）？"; then
+      if confirm "是否立即自动申请证书并启用 HTTPS？"; then
         if ! ensure_email_interactive; then
           warn "邮箱未设置成功，已跳过自动证书流程。你可稍后在证书管理里设置。"
         else
-          if issue_cert_for_domain "$domain"; then
+          local selected_cert_mode
+          selected_cert_mode="$(select_cert_mode_interactive)"
+          if issue_cert_for_domain "$domain" "$selected_cert_mode"; then
             if enable_https_for_conf_file "$domain" "$target" "$desired_port"; then
-              info "已完成：外部反代 + 自动证书 + 自动 HTTPS。"
+              info "已完成：外部反代 + 证书 + HTTPS 启用。"
             else
               warn "证书已申请成功，但启用 HTTPS 失败。请重点检查监听端口占用和 nginx -t 输出。"
             fi
           else
-            warn "自动证书申请失败，当前仅保留 HTTP 反代配置。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
+            warn "证书申请失败。请检查域名解析、端口放行或 DNS API 配置。"
           fi
         fi
       fi
@@ -1769,14 +1822,18 @@ modify_conf() {
       if confirm "是否立即自动申请证书并启用 HTTPS？"; then
         if ! ensure_email_interactive; then
           warn "邮箱未设置成功，已跳过自动证书流程。"
-        elif issue_cert_for_domain "$new_domain"; then
-          if enable_https_for_conf_file "$new_domain" "$new_target" "$new_listen"; then
-            info "已完成：配置修改 + 自动证书 + 自动 HTTPS。"
-          else
-            warn "证书已申请成功，但启用 HTTPS 失败。请检查监听端口占用和 nginx -t 输出。"
-          fi
         else
-          warn "自动证书申请失败。通常是域名未解析到本机、80 端口未放行，或 CDN/防火墙拦截导致。"
+          local selected_cert_mode
+          selected_cert_mode="$(select_cert_mode_interactive)"
+          if issue_cert_for_domain "$new_domain" "$selected_cert_mode"; then
+            if enable_https_for_conf_file "$new_domain" "$new_target" "$new_listen"; then
+              info "已完成：配置修改 + 证书 + HTTPS 启用。"
+            else
+              warn "证书已申请成功，但启用 HTTPS 失败。请检查监听端口占用和 nginx -t 输出。"
+            fi
+          else
+            warn "证书申请失败。请检查域名解析、端口放行或 DNS API 配置。"
+          fi
         fi
       fi
     fi
@@ -2388,6 +2445,68 @@ auto_import_after_install() {
   fi
 }
 
+# ---------- DNS 服务器管理 ----------
+dns_setup_menu() {
+  while true; do
+    clear
+    echo "========== 系统 DNS 设置 =========="
+    echo "当前 DNS 配置："
+    if [[ -f /etc/resolv.conf ]]; then
+      grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | while read -r line; do
+        echo "  ${line}"
+      done
+    else
+      echo "  (未找到 /etc/resolv.conf)"
+    fi
+    echo ""
+    echo "预设 DNS："
+    echo "1) Google      (8.8.8.8 + 8.8.4.4)"
+    echo "2) Cloudflare  (1.1.1.1 + 1.0.0.1)"
+    echo "3) 阿里 DNS    (223.5.5.5 + 223.6.6.6)"
+    echo "4) 腾讯 DNS    (119.29.29.29)"
+    echo "5) 自定义输入"
+    echo "0) 返回上一级"
+    echo "================================"
+    read -rp "请选择: " c
+
+    local ns1="" ns2=""
+
+    case "$c" in
+      1) ns1="8.8.8.8"; ns2="8.8.4.4" ;;
+      2) ns1="1.1.1.1"; ns2="1.0.0.1" ;;
+      3) ns1="223.5.5.5"; ns2="223.6.6.6" ;;
+      4) ns1="119.29.29.29"; ns2="" ;;
+      5)
+        read -rp "请输入首选 DNS: " ns1
+        [[ -z "$ns1" ]] && { error "DNS 不能为空。"; pause; continue; }
+        read -rp "请输入备用 DNS (可留空): " ns2
+        ;;
+      0) return 0 ;;
+      *) warn "无效输入。请输入 0-5 之间的菜单编号。"; pause; continue ;;
+    esac
+
+    if [[ -z "$ns1" ]]; then
+      continue
+    fi
+
+    local tmp_resolv
+    tmp_resolv="$(mktemp /tmp/nginxx-resolv-XXXXXX)"
+    {
+      echo "# Generated by Nginx-X"
+      echo "nameserver ${ns1}"
+      [[ -n "$ns2" ]] && echo "nameserver ${ns2}"
+    } > "$tmp_resolv"
+
+    ${SUDO} cp -a /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
+    ${SUDO} cp -a "$tmp_resolv" /etc/resolv.conf
+    rm -f "$tmp_resolv"
+
+    info "DNS 已更新为：${ns1}${ns2:+ + ${ns2}}"
+    warn "注意：/etc/resolv.conf 可能在系统重启或 DHCP 续租后被覆盖。"
+    pause
+  done
+}
+
 config_entry_menu() {
   while true; do
     clear
@@ -2396,6 +2515,7 @@ config_entry_menu() {
     echo "2) 外部反代"
     echo "3) 配置列表"
     echo "4) 导入已有配置"
+    echo "5) 系统DNS设置"
     echo "0) 返回上一级"
     echo "=============================="
     read -rp "请选择: " c
@@ -2405,8 +2525,9 @@ config_entry_menu() {
       2) run_menu_action add_external_url_proxy; pause ;;
       3) config_manage_menu ;;
       4) run_menu_action import_existing_confs; pause ;;
+      5) dns_setup_menu ;;
       0) return 0 ;;
-      *) warn "无效输入。请输入 0-4 之间的菜单编号。"; pause ;;
+      *) warn "无效输入。请输入 0-5 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -2547,6 +2668,40 @@ detect_cert_mode() {
   else
     echo "http"
   fi
+}
+
+select_cert_mode_interactive() {
+  # 交互式选择证书验证方式，返回 "http" 或 "dns"
+  local choice=""
+  echo "选择证书验证方式："
+  echo "1) HTTP-01（需要 80 端口公网可达）"
+  echo "2) DNS-01（需配置 DNS API Token，适用于 NAT/无80端口）"
+
+  local default_choice="1"
+  if ! ss -lnt 2>/dev/null | awk 'NR>1{print $4}' | grep -qE '(^|:)80$'; then
+    warn "检测到本机未监听 80 端口，建议使用 DNS-01。"
+    default_choice="2"
+  fi
+
+  read -rp "请选择 [1-2] (默认 ${default_choice}): " choice
+  [[ -z "$choice" ]] && choice="$default_choice"
+
+  case "$choice" in
+    2)
+      if ! has_dns_config; then
+        warn "尚未配置 DNS API Token，请先设置。"
+        if ! setup_dns_api; then
+          error "DNS API 配置失败，将回退为 HTTP-01。"
+          echo "http"
+          return 0
+        fi
+      fi
+      echo "dns"
+      ;;
+    *)
+      echo "http"
+      ;;
+  esac
 }
 
 _issue_cert_dns() {
@@ -3015,16 +3170,7 @@ issue_cert() {
     return 1
   fi
 
-  cert_mode="$(detect_cert_mode)"
-  if [[ "$cert_mode" == "dns" ]]; then
-    info "检测到本机未监听 80 端口，将使用 DNS-01 方式申请。"
-  elif has_dns_config; then
-    echo "选择验证方式："
-    echo "1) HTTP-01（需要 80 端口）"
-    echo "2) DNS-01（已配置：${DNS_PROVIDER:-unknown}）"
-    read -rp "请选择 [1-2] (默认 1): " mode_choice
-    [[ "$mode_choice" == "2" ]] && cert_mode="dns"
-  fi
+  cert_mode="$(select_cert_mode_interactive)"
 
   if [[ "$cert_mode" == "dns" ]]; then
     _issue_cert_dns "$domain"
@@ -3035,6 +3181,7 @@ issue_cert() {
 
 issue_cert_for_domain() {
   local domain="$1"
+  local cert_mode="${2:-}"
   load_email
 
   if [[ -z "${ACME_EMAIL:-}" ]]; then
@@ -3042,10 +3189,16 @@ issue_cert_for_domain() {
     return 1
   fi
 
-  local cert_mode
-  cert_mode="$(detect_cert_mode)"
+  if [[ -z "$cert_mode" ]]; then
+    cert_mode="$(detect_cert_mode)"
+  fi
+
   if [[ "$cert_mode" == "dns" ]]; then
-    info "自动使用 DNS-01 方式为 ${domain} 申请证书..."
+    if ! has_dns_config; then
+      error "DNS-01 需要配置 DNS API Token，请先设置。"
+      return 1
+    fi
+    info "使用 DNS-01 方式为 ${domain} 申请证书..."
     _issue_cert_dns "$domain"
   else
     _issue_cert_http "$domain"
@@ -3640,8 +3793,10 @@ enable_https_from_config_list() {
       return 1
     fi
 
-    if ! issue_cert_for_domain "$domain"; then
-      error "自动申请证书失败，无法继续启用 HTTPS。请先修复解析或 80 端口可达性后重试。"
+    local selected_cert_mode
+    selected_cert_mode="$(select_cert_mode_interactive)"
+    if ! issue_cert_for_domain "$domain" "$selected_cert_mode"; then
+      error "证书申请失败，无法继续启用 HTTPS。请检查域名解析、端口放行或 DNS API 配置。"
       return 1
     fi
   fi
