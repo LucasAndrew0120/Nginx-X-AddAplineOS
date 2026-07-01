@@ -265,6 +265,67 @@ detect_pkg_mgr() {
   fi
 }
 
+setup_chinese_locale() {
+  local pkg
+  pkg="$(detect_pkg_mgr)"
+
+  note "正在设置中文 locale 支持..."
+
+  case "$pkg" in
+    apt)
+      if ! ${SUDO} apt-get install -y locales; then
+        warn "locales 包安装失败，跳过中文 locale 设置。"
+        return 0
+      fi
+      if ${SUDO} locale-gen zh_CN.UTF-8 2>/dev/null; then
+        ${SUDO} update-locale LANG=zh_CN.UTF-8 2>/dev/null || true
+        info "中文 locale (zh_CN.UTF-8) 设置完成。"
+      else
+        warn "zh_CN.UTF-8 locale 生成失败。"
+      fi
+      ;;
+    dnf|yum)
+      if ${SUDO} "$pkg" install -y glibc-langpack-zh 2>/dev/null; then
+        info "中文语言包安装完成。"
+      elif ${SUDO} "$pkg" install -y glibc-common 2>/dev/null; then
+        info "中文语言包安装完成。"
+      else
+        warn "中文语言包安装失败。"
+        return 0
+      fi
+      if ${SUDO} localectl set-locale LANG=zh_CN.UTF-8 2>/dev/null; then
+        info "中文 locale (zh_CN.UTF-8) 设置完成。"
+      else
+        warn "locale 设置失败，请手动设置。"
+      fi
+      ;;
+    apk)
+      if ${SUDO} apk add musl-locales 2>/dev/null; then
+        info "musl-locales 安装完成。"
+        if [[ ! -f /etc/profile.d/locale.sh ]]; then
+          echo 'export LANG=zh_CN.UTF-8' | ${SUDO} tee /etc/profile.d/locale.sh >/dev/null
+          ${SUDO} chmod +x /etc/profile.d/locale.sh
+        fi
+        if ! grep -q "LANG=zh_CN.UTF-8" /etc/environment 2>/dev/null; then
+          echo 'LANG=zh_CN.UTF-8' | ${SUDO} tee -a /etc/environment >/dev/null
+        fi
+        export LANG=zh_CN.UTF-8
+        LC_ALL=zh_CN.UTF-8
+        info "中文 locale (zh_CN.UTF-8) 设置完成。"
+      else
+        warn "musl-locales 安装失败，跳过中文 locale 设置。"
+      fi
+      ;;
+    opkg)
+      note "OpenWrt 环境，尝试安装中文语言包..."
+      ${SUDO} opkg install luci-i18n-base-zh-cn 2>/dev/null || warn "OpenWrt 中文语言包安装失败或已安装，可忽略。"
+      ;;
+    *)
+      warn "未知包管理器，跳过中文 locale 设置。"
+      ;;
+  esac
+}
+
 nginx_local_version() {
   if ! check_cmd nginx; then
     echo ""
@@ -394,6 +455,8 @@ install_nginx_official() {
     info "已确保目录存在：${SSL_DIR}"
     return 0
   fi
+
+  setup_chinese_locale
 
   note "开始安装依赖：curl wget socat cron"
 
