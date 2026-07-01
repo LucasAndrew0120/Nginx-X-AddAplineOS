@@ -27,6 +27,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
 EMAIL_CONF="${STATE_DIR}/email.conf"
 DNS_CONF="${STATE_DIR}/dns.conf"
+REPO_URL="https://github.com/LucasAndrew0120/Nginx-X-AddAplineOS.git"
+REPO_BRANCH="alpine-support"
+REPO_INSTALL_DIR="/opt/Nginx-X"
 
 SUDO=""
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -2685,10 +2688,11 @@ detect_cert_mode() {
 
 select_cert_mode_interactive() {
   # 交互式选择证书验证方式，返回 "http" 或 "dns"
+  # 注意：此函数被 $(...) 调用，所有用户提示必须输出到 stderr 才能显示
   local choice=""
-  echo "Select cert verification method:"
-  echo "1) HTTP-01  (requires port 80 reachable)"
-  echo "2) DNS-01   (requires DNS API Token, for NAT/no-port80)"
+  >&2 echo "Select cert verification method:"
+  >&2 echo "1) HTTP-01  (requires port 80 reachable)"
+  >&2 echo "2) DNS-01   (requires DNS API Token, for NAT/no-port80)"
 
   local default_choice="1"
   if ! ss -lnt 2>/dev/null | awk 'NR>1{print $4}' | grep -qE '(^|:)80$'; then
@@ -2703,7 +2707,7 @@ select_cert_mode_interactive() {
     2)
       if ! has_dns_config; then
         warn "DNS API Token not configured, please set up first."
-        if ! setup_dns_api; then
+        if ! setup_dns_api >&2; then
           error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
@@ -4480,12 +4484,40 @@ banner() {
   echo "========================================"
 }
 
+update_script() {
+  note "正在从 ${REPO_URL} (分支: ${REPO_BRANCH}) 更新脚本..."
+
+  if [[ -d "${REPO_INSTALL_DIR}/.git" ]]; then
+    if ! ${SUDO} git -C "${REPO_INSTALL_DIR}" pull origin "${REPO_BRANCH}" --ff-only; then
+      error "拉取最新代码失败，请检查网络或手动更新。"
+      return 1
+    fi
+  elif [[ -d "${REPO_INSTALL_DIR}" ]]; then
+    warn "安装目录存在但不是 Git 仓库，将重新克隆..."
+    ${SUDO} rm -rf "${REPO_INSTALL_DIR}"
+    if ! ${SUDO} git clone -b "${REPO_BRANCH}" "${REPO_URL}" "${REPO_INSTALL_DIR}"; then
+      error "克隆仓库失败，请检查网络。"
+      return 1
+    fi
+  else
+    if ! ${SUDO} git clone -b "${REPO_BRANCH}" "${REPO_URL}" "${REPO_INSTALL_DIR}"; then
+      error "克隆仓库失败，请检查网络。"
+      return 1
+    fi
+  fi
+
+  ${SUDO} install -m 0755 "${REPO_INSTALL_DIR}/nx.sh" /usr/local/bin/nx
+  info "脚本已更新到最新版本。"
+  note "当前运行的仍是旧版本，重新启动 nx 后生效。"
+}
+
 main_menu() {
   echo "1) 安装升级Nginx"
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 实时信息"
   echo "5) 卸载"
+  echo "6) 更新脚本"
   echo "0) 退出"
   echo "========================================"
 }
@@ -4505,8 +4537,9 @@ main() {
       3) cert_menu ;;
       4) realtime_info_menu ;;
       5) uninstall_menu ;;
+      6) run_menu_action update_script; pause ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-5）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
     esac
   done
 }
