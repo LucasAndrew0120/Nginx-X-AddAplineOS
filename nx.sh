@@ -2759,7 +2759,7 @@ select_cert_mode_interactive() {
 
   local default_choice="1"
   if ! ss -lnt 2>/dev/null | awk 'NR>1{print $4}' | grep -qE '(^|:)80$'; then
-    warn "Port 80 not detected, DNS-01 suggested."
+    >&2 warn "Port 80 not detected, DNS-01 suggested."
     default_choice="2"
   fi
 
@@ -2769,9 +2769,9 @@ select_cert_mode_interactive() {
   case "$choice" in
     2)
       if ! has_dns_config; then
-        warn "DNS API Token not configured, please set up first."
+        >&2 warn "DNS API Token not configured, please set up first."
         if ! setup_dns_api >&2; then
-          error "DNS API setup failed, fallback to HTTP-01."
+          >&2 error "DNS API setup failed, fallback to HTTP-01."
           echo "http"
           return 0
         fi
