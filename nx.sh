@@ -27,8 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
 EMAIL_CONF="${STATE_DIR}/email.conf"
 DNS_CONF="${STATE_DIR}/dns.conf"
-REPO_URL="https://github.com/LucasAndrew0120/Nginx-X-AddAplineOS.git"
-REPO_BRANCH="alpine-support"
+REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
+REPO_BRANCH="main"
 REPO_INSTALL_DIR="/opt/Nginx-X"
 
 SUDO=""
@@ -456,7 +456,12 @@ install_nginx_official() {
     return 0
   fi
 
-  setup_chinese_locale
+  # 仅在用户当前 locale 已为中文时才自动安装中文语言包；
+  # 避免在英文环境下强制引入不必要的依赖。
+  local _cur_locale="${LC_ALL:-${LANG:-}}"
+  if [[ "$_cur_locale" =~ ^zh([._-]|$) ]]; then
+    setup_chinese_locale
+  fi
 
   note "开始安装依赖：curl wget socat cron"
 
@@ -2568,6 +2573,35 @@ dns_setup_menu() {
       continue
     fi
 
+    # 保护现有系统：检测 resolv.conf 是否被系统服务托管（systemd-resolved / resolvconf / NetworkManager 等）。
+    # 直接覆盖它的目标会在服务下次重新生成时恢复，也会破坏系统 DNS 管理。
+    local managed_by=""
+    if [[ -L /etc/resolv.conf ]]; then
+      local link_target
+      link_target="$(readlink -f /etc/resolv.conf 2>/dev/null || readlink /etc/resolv.conf)"
+      case "$link_target" in
+        */systemd/resolve/*) managed_by="systemd-resolved" ;;
+        */resolvconf/*)      managed_by="resolvconf" ;;
+        */NetworkManager/*)  managed_by="NetworkManager" ;;
+        *)                   managed_by="symlink -> ${link_target}" ;;
+      esac
+    elif check_cmd systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      managed_by="systemd-resolved (active)"
+    elif check_cmd resolvconf; then
+      managed_by="resolvconf"
+    fi
+
+    if [[ -n "$managed_by" ]]; then
+      warn "检测到 /etc/resolv.conf 由 ${managed_by} 接管。"
+      warn "直接覆盖会被系统重写，且可能破坏现有 DNS 服务。"
+      warn "建议通过对应服务配置修改 DNS（如 systemd-resolved / netplan / NetworkManager）。"
+      if ! confirm "确认仍要直接覆写 /etc/resolv.conf？"; then
+        info "已取消。"
+        pause
+        continue
+      fi
+    fi
+
     local tmp_resolv
     tmp_resolv="$(mktemp /tmp/nginxx-resolv-XXXXXX)"
     {
@@ -2576,7 +2610,11 @@ dns_setup_menu() {
       [[ -n "$ns2" ]] && echo "nameserver ${ns2}"
     } > "$tmp_resolv"
 
+    # 如果 resolv.conf 是符号链接，先删除链接再写入普通文件，避免写回链接目标目录。
     ${SUDO} cp -a /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
+    if [[ -L /etc/resolv.conf ]]; then
+      ${SUDO} rm -f /etc/resolv.conf
+    fi
     ${SUDO} cp -a "$tmp_resolv" /etc/resolv.conf
     rm -f "$tmp_resolv"
 
@@ -2627,12 +2665,18 @@ save_dns_conf() {
   local key1="$2"
   local key2="$3"
   ensure_state_dir
-  cat > "$DNS_CONF" <<EOF
+  # 密钥属于敏感信息，先设置只读权限再写入，避免明文密钥被同机其他用户读到。
+  (
+    umask 077
+    cat > "$DNS_CONF" <<EOF
 DNS_PROVIDER="${provider}"
 DNS_KEY1="${key1}"
 DNS_KEY2="${key2}"
 EOF
-  info "DNS API 配置已保存到：${DNS_CONF}"
+  )
+  chmod 600 "$DNS_CONF" 2>/dev/null || true
+  info "DNS API 配置已保存到：${DNS_CONF}（权限 600）。"
+  warn "提醒：DNS API 密钥以明文存储于该文件，请自行保护该主机的账户权限。"
 }
 
 has_dns_config() {
@@ -4548,10 +4592,32 @@ banner() {
 }
 
 update_script() {
+  # 优先使用当前脚本所在目录（如果它本身是个 git 仓库），
+  # 其次 fallback 到传统安装目录 REPO_INSTALL_DIR（/opt/Nginx-X）。
+  # 以适配安装到非标准路径 / 开发环境直接运行的场景。
+  local work_dir=""
+  if [[ -n "${SCRIPT_DIR:-}" && -d "${SCRIPT_DIR}/.git" ]]; then
+    work_dir="${SCRIPT_DIR}"
+  elif [[ -d "${REPO_INSTALL_DIR}/.git" ]]; then
+    work_dir="${REPO_INSTALL_DIR}"
+  fi
+
   note "正在从 ${REPO_URL} (分支: ${REPO_BRANCH}) 更新脚本..."
 
-  if [[ -d "${REPO_INSTALL_DIR}/.git" ]]; then
-    if ! ${SUDO} git -C "${REPO_INSTALL_DIR}" pull origin "${REPO_BRANCH}" --ff-only; then
+  if [[ -n "$work_dir" ]]; then
+    # 校对 remote，防止已仓库指向旧 fork
+    local cur_remote=""
+    cur_remote="$(${SUDO} git -C "$work_dir" remote get-url origin 2>/dev/null || echo '')"
+    if [[ -n "$cur_remote" && "$cur_remote" != "$REPO_URL" ]]; then
+      warn "当前仓库 remote 与内置 REPO_URL 不一致："
+      warn "  本地: $cur_remote"
+      warn "  预期: $REPO_URL"
+      if ! confirm "仍从本地 remote 拉取（保留现有配置）？"; then
+        info "已取消更新。"
+        return 0
+      fi
+    fi
+    if ! ${SUDO} git -C "$work_dir" pull --ff-only origin "${REPO_BRANCH}"; then
       error "拉取最新代码失败，请检查网络或手动更新。"
       return 1
     fi
@@ -4562,15 +4628,26 @@ update_script() {
       error "克隆仓库失败，请检查网络。"
       return 1
     fi
+    work_dir="${REPO_INSTALL_DIR}"
   else
     if ! ${SUDO} git clone -b "${REPO_BRANCH}" "${REPO_URL}" "${REPO_INSTALL_DIR}"; then
       error "克隆仓库失败，请检查网络。"
       return 1
     fi
+    work_dir="${REPO_INSTALL_DIR}"
   fi
 
-  ${SUDO} install -m 0755 "${REPO_INSTALL_DIR}/nx.sh" /usr/local/bin/nx
-  info "脚本已更新到最新版本。"
+  # 推断 nx 可执行文件的安装目标：
+  # 1) 若 command -v nx 能找到，使用它的实际路径
+  # 2) 否则 fallback 到 /usr/local/bin/nx
+  local target_bin=""
+  if check_cmd nx; then
+    target_bin="$(command -v nx 2>/dev/null || true)"
+  fi
+  [[ -z "$target_bin" ]] && target_bin="/usr/local/bin/nx"
+
+  ${SUDO} install -m 0755 "${work_dir}/nx.sh" "$target_bin"
+  info "脚本已更新到最新版本（${target_bin}）。"
   note "当前运行的仍是旧版本，重新启动 nx 后生效。"
 }
 
