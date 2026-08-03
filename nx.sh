@@ -27,8 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nginxx"
 EMAIL_CONF="${STATE_DIR}/email.conf"
 DNS_CONF="${STATE_DIR}/dns.conf"
-REPO_URL="https://github.com/Xiuyixx/Nginx-X.git"
-REPO_BRANCH="main"
+REPO_URL="https://github.com/LucasAndrew0120/Nginx-X-AddAplineOS.git"
+REPO_BRANCH="test-installer-alpine-support"
 REPO_INSTALL_DIR="/opt/Nginx-X"
 
 NGINX_MIRRORS=(

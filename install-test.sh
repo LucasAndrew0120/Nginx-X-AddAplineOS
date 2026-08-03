@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/LucasAndrew0120/Nginx-X-AddAplineOS.git"
-REPO_BRANCH="alpine-support"
+REPO_BRANCH="test-installer-alpine-support"
 INSTALL_DIR="/opt/Nginx-X"
 TARGET_BIN="/usr/local/bin/nx"
 
