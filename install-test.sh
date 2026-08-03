@@ -39,9 +39,9 @@ echo "[INFO] 安装 Nginx-X 测试版：${REPO_URL} (${REPO_BRANCH})"
 install_git_if_needed
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  ${SUDO} git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
-  ${SUDO} git -C "$INSTALL_DIR" fetch origin "$REPO_BRANCH"
-  ${SUDO} git -C "$INSTALL_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH"
+  (cd "$INSTALL_DIR" && ${SUDO} git remote set-url origin "$REPO_URL")
+  (cd "$INSTALL_DIR" && ${SUDO} git fetch origin "$REPO_BRANCH")
+  (cd "$INSTALL_DIR" && ${SUDO} git checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH")
 elif [[ -e "$INSTALL_DIR" ]]; then
   echo "[WARN] 目标目录已存在但不是 Git 仓库，将移动备份。"
   ${SUDO} mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
