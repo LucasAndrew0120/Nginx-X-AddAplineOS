@@ -35,19 +35,36 @@ install_git_if_needed() {
   fi
 }
 
+backup_existing_install_dir() {
+  local backup_dir
+  backup_dir="${INSTALL_DIR}.bak.$(date +%s)"
+  echo "[WARN] 已备份现有安装目录：${backup_dir}"
+  ${SUDO} mv "$INSTALL_DIR" "$backup_dir"
+}
+
+clone_fresh() {
+  ${SUDO} git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+}
+
 echo "[INFO] 安装 Nginx-X 测试版：${REPO_URL} (${REPO_BRANCH})"
 install_git_if_needed
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  (cd "$INSTALL_DIR" && ${SUDO} git remote set-url origin "$REPO_URL")
-  (cd "$INSTALL_DIR" && ${SUDO} git fetch origin "$REPO_BRANCH")
-  (cd "$INSTALL_DIR" && ${SUDO} git checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH")
+  if [[ -n "$(cd "$INSTALL_DIR" && ${SUDO} git status --porcelain)" ]]; then
+    echo "[WARN] 检测到 ${INSTALL_DIR} 存在本地改动，将备份后重新克隆测试分支。"
+    backup_existing_install_dir
+    clone_fresh
+  else
+    (cd "$INSTALL_DIR" && ${SUDO} git remote set-url origin "$REPO_URL")
+    (cd "$INSTALL_DIR" && ${SUDO} git fetch origin "$REPO_BRANCH")
+    (cd "$INSTALL_DIR" && ${SUDO} git checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH")
+  fi
 elif [[ -e "$INSTALL_DIR" ]]; then
   echo "[WARN] 目标目录已存在但不是 Git 仓库，将移动备份。"
-  ${SUDO} mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
-  ${SUDO} git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  backup_existing_install_dir
+  clone_fresh
 else
-  ${SUDO} git clone -b "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  clone_fresh
 fi
 
 ${SUDO} install -m 0755 "$INSTALL_DIR/nx.sh" "$TARGET_BIN"
