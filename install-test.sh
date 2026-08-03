@@ -51,6 +51,5 @@ else
 fi
 
 ${SUDO} install -m 0755 "$INSTALL_DIR/nx.sh" "$TARGET_BIN"
-${SUDO} install -m 0755 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/install.sh"
 
 echo "[OK] 测试版已安装。运行：nx"
