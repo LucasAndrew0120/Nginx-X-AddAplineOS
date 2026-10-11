@@ -15,7 +15,7 @@ NC='\033[0m'
 
 # ---------- 全局变量 ----------
 APP_NAME="Nginx-X"
-APP_VERSION="3.4.9"
+APP_VERSION="3.4.10"
 # Alpine 的 nginx 把 server 配置放在 http.d，其他系统用 conf.d
 if [[ -f /etc/nginx/http.d ]] || [[ -d /etc/nginx/http.d ]]; then
   CONF_DIR="/etc/nginx/http.d"
@@ -148,7 +148,7 @@ installed_script_target() {
 
 require_nginx_installed() {
   if ! check_cmd nginx; then
-    error "未检测到 Nginx。请先到主菜单执行 [1) 安装升级Nginx]。"
+    error "未检测到 Nginx。请先到主菜单执行 [1) 安装升级] → [1) 安装升级 Nginx]。"
     return 1
   fi
 }
@@ -887,7 +887,7 @@ upgrade_nginx_smart() {
   fi
 }
 
-# ---------- 功能1：安装升级Nginx（合并入口） ----------
+# ---------- 功能1：安装升级 Nginx ----------
 install_or_upgrade_nginx() {
   ensure_runtime_dependencies || return 1
   # 未安装时先安装；已安装时走智能升级逻辑
@@ -897,6 +897,38 @@ install_or_upgrade_nginx() {
   else
     upgrade_nginx_smart
   fi
+}
+
+install_upgrade_menu() {
+  local choice
+  # 11 requests a clean main-loop exit after EOF or a non-interactive update.
+  while true; do
+    clear
+    echo "========== 安装升级 =========="
+    echo "1) 安装升级 Nginx"
+    echo "2) 更新脚本"
+    echo "0) 返回上级"
+    echo "=============================="
+    read -rp "请选择（0-2）: " choice || return 11
+
+    case "$choice" in
+      1)
+        echo "安装升级 Nginx：检查依赖并安装或升级 Nginx，完成后校验配置。"
+        run_menu_action install_or_upgrade_nginx
+        pause
+        ;;
+      2)
+        echo "更新脚本：核对远端并更新脚本及完整 bundle；不会安装或升级 Nginx。"
+        NX_UPDATE_HUP=0
+        NX_IN_MENU=1 run_menu_action update_script
+        [[ "${NX_UPDATE_HUP:-0}" != 1 ]] || return 129
+        [[ -t 0 && -t 1 ]] || return 11
+        pause
+        ;;
+      0) return 0 ;;
+      *) warn "无效输入，请输入 0-2 之间的菜单编号。"; pause ;;
+    esac
+  done
 }
 
 # ---------- 反向代理配置通用 ----------
@@ -3010,12 +3042,11 @@ PYWORKER
 }
 
 main_menu() {
-  echo "1) 安装升级Nginx"
+  echo "1) 安装升级"
   echo "2) 配置管理"
   echo "3) 证书管理"
   echo "4) 运行状态"
-  echo "5) 更新脚本"
-  echo "6) 卸载"
+  echo "5) 卸载"
   echo "0) 退出脚本"
   echo "========================================"
 }
@@ -3029,17 +3060,21 @@ main() {
   while true; do
     banner
     main_menu
-    read -rp "请选择（0-6）: " choice || return 0
+    read -rp "请选择（0-5）: " choice || return 0
 
     case "$choice" in
-      1) run_menu_action install_or_upgrade_nginx; pause ;;
+      1)
+        local menu_rc=0
+        install_upgrade_menu || menu_rc=$?
+        [[ "$menu_rc" != 129 ]] || return 129
+        [[ "$menu_rc" != 11 ]] || return 0
+        ;;
       2) config_entry_menu ;;
       3) cert_menu ;;
       4) realtime_info_menu ;;
-      5) NX_IN_MENU=1 run_menu_action update_script; NX_IN_MENU=0; [[ "${NX_UPDATE_HUP:-0}" != 1 ]] || return 129; [[ -t 0 && -t 1 ]] || return 0; pause ;;
-      6) uninstall_menu ;;
+      5) uninstall_menu ;;
       0) info "已退出 ${APP_NAME}。"; exit 0 ;;
-      *) warn "无效输入，请输入主菜单中的编号（0-6）。"; pause ;;
+      *) warn "无效输入，请输入主菜单中的编号（0-5）。"; pause ;;
     esac
   done
 }

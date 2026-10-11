@@ -46,9 +46,10 @@ for entry in "$root/nx.sh" "$T/bundle"; do
   [[ ! -e "$T/pwned" && ! -e "$T/mutation" && "$before" == "$(sha256sum "$DNS_CONF")" ]]
   main_menu > "$T/menu"
   grep -q '^4) 运行状态' "$T/menu"
-  grep -q '^5) 更新脚本' "$T/menu"; grep -q '^6) 卸载' "$T/menu"
+  grep -q '^1) 安装升级$' "$T/menu"
+  grep -q '^5) 卸载$' "$T/menu"
+  grep -q '^6)' "$T/menu" && exit 1
   grep -q '^7)' "$T/menu" && exit 1
-
   # Drive the actual main -> 4 -> original submenu choices -> return path.
   # Stub only host initialization and leaf actions; keep real menu dispatch,
   # panel and input handling. A clear marker verifies each complete redraw.
