@@ -224,8 +224,22 @@ disable_conf() {
 }
 
 delete_conf() {
-  local file="${1:-}"
+  local file="${1:-}" backend
   [[ -n "$file" && -f "$CONF_DIR/$file" ]] || return 1
+  # Protected sites must be explicitly unprotected before deletion.  Check
+  # while the file still exists so the backend guard can inspect its trusted
+  # bytes and return the documented lifecycle error instead of the misleading
+  # "missing trusted path" produced after nx_remove_conf removed it.
+  if [[ -d "${NX_BACKEND_STATE_DIR:-/var/lib/nginxx/backend-protection}" ]]; then
+    if ! backend="$(nx_backend_status "$CONF_DIR/$file" 2>/dev/null)"; then
+      error "无法确认 ${file} 的后端保护状态；未删除配置。"
+      return 1
+    fi
+    if [[ "$backend" == *'"sites": {'* && "$backend" != *'"sites": {}'* ]]; then
+      error "${file} 仍启用后端保护；请先在仅域名访问菜单中关闭保护，再删除配置。"
+      return 1
+    fi
+  fi
   confirm "确认永久删除 ${file} ?" || return 0
   nx_transaction nx_remove_conf "$CONF_DIR/$file" || return 1
   info "已删除：${file}"
